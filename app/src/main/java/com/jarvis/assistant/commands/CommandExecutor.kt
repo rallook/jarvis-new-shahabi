@@ -3,6 +3,8 @@ package com.jarvis.assistant.commands
 import com.jarvis.assistant.accessibility.JarvisAccessibilityService
 import com.jarvis.assistant.accessibility.WhatsAppExecutor
 import com.jarvis.assistant.accessibility.WhatsAppStepResult
+import com.jarvis.assistant.accessibility.YouTubeExecutor
+import com.jarvis.assistant.accessibility.YouTubeStepResult
 import com.jarvis.assistant.android.AppLauncher
 import kotlinx.coroutines.delay
 
@@ -15,6 +17,9 @@ class CommandExecutor(
     private val appLauncher: AppLauncher,
     private val whatsAppExecutor: WhatsAppExecutor = WhatsAppExecutor {
         JarvisAccessibilityService.instance
+    },
+    private val youTubeExecutor: YouTubeExecutor = YouTubeExecutor {
+        JarvisAccessibilityService.instance
     }
 ) {
     suspend fun execute(
@@ -24,6 +29,8 @@ class CommandExecutor(
         return when (command) {
             is JarvisCommand.OpenApp -> openApp(command, onProgress)
             is JarvisCommand.SendWhatsAppMessage -> prepareWhatsAppSend(command, onProgress)
+            is JarvisCommand.YouTubePlay -> playYouTube(command, onProgress)
+            is JarvisCommand.YouTubeSearch -> searchYouTube(command, onProgress)
             is JarvisCommand.Unsupported -> CommandResult.Failure(command.reason)
         }
     }
@@ -80,6 +87,15 @@ class CommandExecutor(
                 else -> Unit
             }
         }
+        if (command.appName.contains("youtube", ignoreCase = true) ||
+            result.packageName == YouTubeExecutor.PACKAGE_YOUTUBE
+        ) {
+            val pkg = result.packageName ?: YouTubeExecutor.PACKAGE_YOUTUBE
+            when (val visible = youTubeExecutor.waitUntilYouTubeVisible(pkg)) {
+                is YouTubeStepResult.Failure -> return CommandResult.Failure(visible.message)
+                else -> Unit
+            }
+        }
         return CommandResult.Success
     }
 
@@ -131,5 +147,107 @@ class CommandExecutor(
 
         onProgress("Ready to send")
         return CommandResult.NeedsConfirmation(command, pkg)
+    }
+
+    private suspend fun playYouTube(
+        command: JarvisCommand.YouTubePlay,
+        onProgress: suspend (String) -> Unit
+    ): CommandResult {
+        if (!JarvisAccessibilityService.isConnected()) {
+            return CommandResult.Failure(
+                "Enable the Jarvis Accessibility Service in Android Settings before controlling YouTube."
+            )
+        }
+
+        onProgress("Opening YouTube…")
+        val launch = appLauncher.openYouTube()
+        if (!launch.success || launch.packageName == null) {
+            return CommandResult.Failure(launch.message)
+        }
+        when (val visible = youTubeExecutor.waitUntilYouTubeVisible(launch.packageName)) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(visible.message)
+            else -> Unit
+        }
+        delay(500)
+
+        onProgress("Opening search…")
+        when (val search = youTubeExecutor.openSearchField()) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(search.message)
+            else -> Unit
+        }
+
+        onProgress("Searching for ${command.songName}…")
+        when (val typed = youTubeExecutor.enterSearchQuery(command.songName)) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(typed.message)
+            else -> Unit
+        }
+        when (val submitted = youTubeExecutor.submitSearch()) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(submitted.message)
+            else -> Unit
+        }
+        when (val results = youTubeExecutor.verifyResultsPage(command.songName)) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(results.message)
+            else -> Unit
+        }
+
+        onProgress("Selecting a result…")
+        when (val selected = youTubeExecutor.selectAppropriateResult(command.songName)) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(selected.message)
+            else -> Unit
+        }
+
+        onProgress("Starting playback…")
+        when (val playing = youTubeExecutor.verifyPlayback(command.songName)) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(playing.message)
+            YouTubeStepResult.Success -> {
+                onProgress("Playing ${command.songName}.")
+                return CommandResult.Success
+            }
+        }
+    }
+
+    private suspend fun searchYouTube(
+        command: JarvisCommand.YouTubeSearch,
+        onProgress: suspend (String) -> Unit
+    ): CommandResult {
+        if (!JarvisAccessibilityService.isConnected()) {
+            return CommandResult.Failure(
+                "Enable the Jarvis Accessibility Service in Android Settings before controlling YouTube."
+            )
+        }
+
+        onProgress("Opening YouTube…")
+        val launch = appLauncher.openYouTube()
+        if (!launch.success || launch.packageName == null) {
+            return CommandResult.Failure(launch.message)
+        }
+        when (val visible = youTubeExecutor.waitUntilYouTubeVisible(launch.packageName)) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(visible.message)
+            else -> Unit
+        }
+        delay(500)
+
+        onProgress("Opening search…")
+        when (val search = youTubeExecutor.openSearchField()) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(search.message)
+            else -> Unit
+        }
+
+        onProgress("Searching for ${command.query}…")
+        when (val typed = youTubeExecutor.enterSearchQuery(command.query)) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(typed.message)
+            else -> Unit
+        }
+        when (val submitted = youTubeExecutor.submitSearch()) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(submitted.message)
+            else -> Unit
+        }
+        when (val results = youTubeExecutor.verifyResultsPage(command.query)) {
+            is YouTubeStepResult.Failure -> return CommandResult.Failure(results.message)
+            YouTubeStepResult.Success -> {
+                onProgress("Showing YouTube results for ${command.query}.")
+                return CommandResult.Success
+            }
+        }
     }
 }

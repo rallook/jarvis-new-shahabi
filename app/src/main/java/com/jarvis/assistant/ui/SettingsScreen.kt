@@ -23,6 +23,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.RecordVoiceOver
@@ -64,6 +65,7 @@ data class SettingsScreenState(
     val settings: JarvisSettings = JarvisSettings(),
     val accessibilityEnabled: Boolean = false,
     val microphoneGranted: Boolean = false,
+    val overlayGranted: Boolean = false,
     val savedMessage: String? = null
 )
 
@@ -80,7 +82,8 @@ fun SettingsScreen(
     onToggleHeuristic: (Boolean) -> Unit,
     onToggleTts: (Boolean) -> Unit,
     onRefreshStatus: () -> Unit,
-    onRequestMicrophone: () -> Unit
+    onRequestMicrophone: () -> Unit,
+    onRequestOverlayPermission: () -> Unit
 ) {
     val context = LocalContext.current
     var apiKeyDraft by remember { mutableStateOf("") }
@@ -144,7 +147,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             Text(
-                text = "Configure Jarvis for voice commands, AI understanding, and WhatsApp automation.",
+                text = "Configure Jarvis for voice commands, AI understanding, WhatsApp / YouTube automation, and the floating panel.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -174,7 +177,7 @@ fun SettingsScreen(
                     icon = Icons.Rounded.AccessibilityNew,
                     title = "Accessibility service",
                     subtitle = if (state.accessibilityEnabled) {
-                        "Enabled — WhatsApp automation ready"
+                        "Enabled — WhatsApp & YouTube automation ready"
                     } else {
                         "Must be enabled manually in Android Settings"
                     },
@@ -189,6 +192,27 @@ fun SettingsScreen(
                 ) {
                     Text("Open Accessibility settings")
                 }
+
+                StatusRow(
+                    icon = Icons.Rounded.Layers,
+                    title = "Display over other apps",
+                    subtitle = if (state.overlayGranted) {
+                        "Granted — floating Jarvis panel can appear above other apps"
+                    } else {
+                        "Required for the floating voice panel over WhatsApp, YouTube, Chrome, etc."
+                    },
+                    ok = state.overlayGranted
+                )
+                if (!state.overlayGranted) {
+                    Button(
+                        onClick = onRequestOverlayPermission,
+                        shape = ButtonShape,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Allow display over other apps")
+                    }
+                }
+
                 OutlinedButton(
                     onClick = onRefreshStatus,
                     shape = ButtonShape,
@@ -374,7 +398,7 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     icon = Icons.Rounded.Psychology,
                     title = "Heuristic fallback",
-                    subtitle = "If OpenAI fails or no key is set, parse common WhatsApp phrases locally",
+                    subtitle = "If OpenAI fails or no key is set, parse WhatsApp / YouTube phrases locally",
                     checked = state.settings.allowHeuristicFallback,
                     onCheckedChange = onToggleHeuristic
                 )

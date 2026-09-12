@@ -102,10 +102,10 @@ If Gofile does not open, use the [Google Drive fallback folder](https://drive.go
 - ☁️ Drive fallback (videos + APK): https://drive.google.com/drive/folders/1633fZ8nAmVpHABdfjmw3RliFhVChsLxj?usp=sharing
 
 ### 📦 Download APK
-- ⬇️ **Gofile:** https://gofile.io/d/sfA866Cu
+- ⬇️ **Gofile (v0.2.0 — YouTube + floating panel):** https://gofile.io/d/5piO8Px2
 - ☁️ **Fallback if Gofile does not work:** [Google Drive folder](https://drive.google.com/drive/folders/1633fZ8nAmVpHABdfjmw3RliFhVChsLxj?usp=sharing) (`app-debug.apk`)
 
-Sideload the APK, enable unknown sources if asked, then **Settings → My apps → Jarvis → Allow restricted settings**, then **Settings → Accessibility → Jarvis**. 🔓
+Sideload the APK, enable unknown sources if asked, then **Settings → My apps → Jarvis → Allow restricted settings**, then **Settings → Accessibility → Jarvis**. Also allow **Display over other apps** for the floating voice panel. 🔓
 
 ## 🙌 Team Contributions
 - 🌟 Muhammed Rilzan AM: project owner — idea, implementation, demos
