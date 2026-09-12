@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Jarvis</string>
+    <string name="accessibility_service_description">Jarvis uses Accessibility to locate WhatsApp chats, type messages, and verify results. Jarvis never sends a message without your confirmation.</string>
+    <string name="speech_service_channel">Jarvis voice</string>
+    <string name="speech_service_notification">Listening for your command</string>
+    <string name="setup_accessibility_title">Enable Accessibility</string>
+    <string name="setup_accessibility_body">Android requires you to manually enable the Jarvis Accessibility Service in system settings. Jarvis cannot enable this for you.</string>
+    <string name="setup_mic_title">Microphone permission</string>
+    <string name="setup_mic_body">Jarvis needs the microphone to hear voice commands.</string>
+    <string name="open_accessibility_settings">Open Accessibility settings</string>
+    <string name="continue_label">Continue</string>
+    <string name="ready">Ready</string>
+    <string name="listening">Listening…</string>
+    <string name="thinking">Thinking…</string>
+    <string name="working">Working…</string>
+    <string name="waiting_confirmation">Waiting for confirmation</string>
+    <string name="completed">Completed</string>
+    <string name="voice_command">Voice command</string>
+    <string name="tap_to_speak">Tap the microphone and speak</string>
+    <string name="send">Send</string>
+    <string name="cancel">Cancel</string>
+</resources>

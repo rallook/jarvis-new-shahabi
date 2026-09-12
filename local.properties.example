@@ -1,0 +1,8 @@
+## Copy this file to local.properties and fill in your values.
+## local.properties is gitignored and must never be committed.
+
+sdk.dir=C\:\\Users\\YOUR_USER\\AppData\\Local\\Android\\Sdk
+
+# Development only — never ship a production OpenAI key inside the APK.
+# Prefer a secure backend that holds the key and exposes a Jarvis brain endpoint.
+OPENAI_API_KEY=sk-your-dev-key-here
