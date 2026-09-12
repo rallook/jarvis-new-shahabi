@@ -1,79 +1,118 @@
-# Jarvis
+# Jarvis 🎯
 
-Native Android voice assistant foundation (Kotlin + Jetpack Compose) focused on one reliable workflow:
+## 📌 Basic Details
+### 🏷️ Team Name: Jarvis
 
-> “Open WhatsApp and send ‘I will come tomorrow’ to Rahul.”
+### 👥 Team Members
+- 🥇 Team Lead: Muhammed Rilzan AM - Kunnamangalam Higher Secondary School
 
-## What v0.1 does
+### 🧭 Mentor
+Ahmed Shahabi
 
-1. Listens with Android speech recognition (swappable later)
-2. Shows live transcription in a bottom Material panel
-3. Understands intent via OpenAI → structured `JarvisCommand` (never executes UI itself)
-4. Opens WhatsApp with a normal launch intent
-5. Uses AccessibilityService to find the chat, type the message, and locate Send
-6. Asks for confirmation before sending
-7. Verifies the send and speaks a short TTS reply
+### 📝 Project Description
+A useless and fun project for those who are lazy enough to open their phone and apps to send messages or to do any action in their smartphone, by allowing activation through voice commands. 😴🎙️📱
 
-## Architecture
+### 🫠 The Problem (that doesn't exist)
+Unlocking the phone, finding the right app, tapping a chat, and typing a whole sentence is exhausting. 😩 Your thumbs deserve a vacation. 🏖️ Opening YouTube or WhatsApp with actual fingers is simply too much work.
 
+### 🪄 The Solution (that nobody asked for)
+Tap the mic 🎙️, speak like a slightly tired human, and let Jarvis do the tapping. ✨
+
+1. 🗣️ On-device Android speech recognition turns your voice into text (not Whisper, not OpenAI).
+2. 🧩 A local heuristic parser (or optional OpenAI, if you add a key later) turns that text into a command.
+3. 📲 Jarvis finds the app, opens it, and — for WhatsApp — can type the message and ask before sending. ✅
+
+**📌 N.B.** This is not an AI-required project right now. **No AI API token is needed to run the app.** 🚫🤖 The OpenAI token field in Settings is only for future updates. Voice-to-text is on-device Android speech recognition. OpenAI would only run *after* a transcript exists, to turn that text into a command. There is already a fallback that finds apps and matches simple phrases like `open WhatsApp` or `send … to …`. 🔍
+
+### 🗑️ What we removed (version 1)
+Our previous version had complete control over the device and activated just like Google Assistant — it invoked automatically on a “Hey Jarvis” 👋 voice message. We removed that feature because it crashed on small Android devices 💥 and needed a lot of restricted permissions to run smoothly.
+
+See the [version 1 demo](https://gofile.io/d/z5UNkxkH) for how the old always-on build looked. 📼
+
+## 🛠️ Technical Details
+### 🧰 Technologies/Components Used
+For Software:
+- 💜 Kotlin
+- 🎨 Jetpack Compose + Material 3
+- 🎤 Android SpeechRecognizer (on-device voice-to-text)
+- 🔊 Android Text-to-Speech
+- ♿ AccessibilityService (WhatsApp tap / type / send)
+- 🧠 Heuristic command parser + installed-app lookup
+- 🔮 Optional OpenAI (OkHttp + kotlinx.serialization) — not required
+- 💻 Android Studio / Gradle
+
+## 🚀 Implementation
+### 📥 Installation
+Open this folder as a Gradle project in Android Studio, or skip building and install the APK below. 📦
+
+Prefer a physical phone with WhatsApp installed. 📱 Emulators often lack Google speech recognition and real WhatsApp.
+
+### ▶️ Run
+1. 📦 Install the APK (or Run from Android Studio).
+2. 🎤 Allow **Microphone**.
+3. 🔓 Give Accessibility permission (required after sideloading):
+   - **Settings → My apps → Jarvis → Allow restricted settings**
+   - Then **Settings → Accessibility → Jarvis** and turn the service on
+4. 🎙️ Tap the mic and speak, or type a command. Example: `Open WhatsApp and send “I will come tomorrow” to Rahul.`
+
+Jarvis cannot secretly enable Accessibility. 🔒 On newer Android, sideloaded apps must get **Allow restricted settings** before the Accessibility toggle will appear.
+
+OpenAI key in Settings is optional and unused unless you add one for future smarter parsing. 🔑
+
+## 📚 Project Documentation
+
+### 📸 Screenshots (Add at least 3)
+![Listening](docs/screenshot-listening.png)
+*🎧 Home screen while Jarvis is listening — tap the mic and speak, or type a command.*
+
+![WhatsApp opened](docs/screenshot-whatsapp.png)
+*💚 Jarvis opens WhatsApp after a voice command so you do not have to hunt for the icon.*
+
+![Completed](docs/screenshot-completed.png)
+*✅ Done — confirmation that the WhatsApp message was sent.*
+
+### 🗺️ Diagrams
+```mermaid
+flowchart LR
+    Idle --> Listening
+    Listening --> Transcribing
+    Transcribing --> Thinking
+    Thinking --> Executing
+    Executing --> Confirmation
+    Confirmation --> Sending
+    Sending --> Verifying
+    Verifying --> Completed
+    Completed --> Idle
 ```
-ui/            MainScreen + Material 3 theme
-voice/         SpeechRecognizerManager (+ optional mic FGS)
-ai/            JarvisBrain, OpenAIClient, AiService
-commands/      JarvisCommand, CommandParser, CommandExecutor
-android/       AppLauncher
-accessibility/ JarvisAccessibilityService, NodeFinder, WhatsAppExecutor
-tts/           JarvisTTS
-state/         JarvisPhase + JarvisViewModel
-```
+*🔁 Voice state machine: listen on-device, parse the command (heuristic or optional AI), execute, confirm before send, then idle again.*
 
-Future action types (`CLICK`, `SCROLL`, `SWIPE`, …) are reserved in `ActionType` but not implemented yet.
+## 🎬 Project Demo
 
-## Setup
+### 🎥 Video
+[Final version — long demo](https://gofile.io/d/fagASq0l)
 
-### 1. Open in Android Studio
+*Current Jarvis: voice command, open apps, send a WhatsApp message.* 🗣️📲💬
 
-Open this folder as a Gradle project.
+If Gofile does not open, use the [Google Drive fallback folder](https://drive.google.com/drive/folders/1633fZ8nAmVpHABdfjmw3RliFhVChsLxj?usp=sharing) (`Final version long video`). ☁️
 
-### 2. API key
+### 🎞️ Additional Demos
+- ⏱️ [Final version — short](https://gofile.io/d/aPjGGsXw) — quicker current-app clip
+- 🕰️ [Version 1 / first version](https://gofile.io/d/z5UNkxkH) — old “Hey Jarvis” always-on build (removed)
+- 📁 All three videos in one Gofile folder: https://gofile.io/d/VqnUM2J8
+- ☁️ Drive fallback (videos + APK): https://drive.google.com/drive/folders/1633fZ8nAmVpHABdfjmw3RliFhVChsLxj?usp=sharing
 
-In the app: open **Settings** (gear icon) → **OpenAI** → paste your key → **Save key**.
+### 📦 Download APK
+- ⬇️ **Gofile:** https://gofile.io/d/sfA866Cu
+- ☁️ **Fallback if Gofile does not work:** [Google Drive folder](https://drive.google.com/drive/folders/1633fZ8nAmVpHABdfjmw3RliFhVChsLxj?usp=sharing) (`app-debug.apk`)
 
-The key is stored in encrypted SharedPreferences on the device and is never logged.
+Sideload the APK, enable unknown sources if asked, then **Settings → My apps → Jarvis → Allow restricted settings**, then **Settings → Accessibility → Jarvis**. 🔓
 
-Optional debug fallback: set `OPENAI_API_KEY` in `local.properties` (gitignored). The in-app Settings key takes priority.
+## 🙌 Team Contributions
+- 🌟 Muhammed Rilzan AM: project owner — idea, implementation, demos
+- 🧭 Mentor: Ahmed Shahabi
 
-- Release builds clear the embedded BuildConfig key
-- Prefer a secure backend for production (`Settings → Secure backend`)
+---
+Made with ❤️ at TinkerHub Useless Projects
 
-
-### 3. Run on a device
-
-Emulators often lack Google speech recognition and real WhatsApp. Prefer a physical phone with WhatsApp installed.
-
-### 4. Permissions / Accessibility
-
-On first launch:
-
-1. Allow **Microphone**
-2. Open **Settings → Accessibility → Jarvis** and enable the service manually  
-   Jarvis cannot secretly enable accessibility.
-
-## Voice state machine
-
-`IDLE → LISTENING → TRANSCRIBING → THINKING → EXECUTING → CONFIRMATION → SENDING → VERIFYING → COMPLETED → IDLE`
-
-## Security notes
-
-`OpenAIClient` is the isolation point for moving to a secure backend:
-
-- `BuildConfig.USE_SECURE_BACKEND`
-- `BuildConfig.SECURE_BACKEND_URL`
-
-Production should never ship an OpenAI secret inside the APK.
-
-## Known limitations (honest)
-
-- WhatsApp UI / view IDs change between versions and locales; the executor prefers view IDs, then content descriptions / text, never raw coordinates as the primary method.
-- Contact matching refuses to guess when multiple chats match.
-- Universal phone control is intentionally out of scope for this version.
+![Static Badge](https://img.shields.io/badge/TinkerHub-24?color=%23000000&link=https%3A%2F%2Fwww.tinkerhub.org%2F)
+![Static Badge](https://img.shields.io/badge/UselessProjects--26-26?link=https%3A%2F%2Ftinkerhub.org%2Fevents%2F1M8ORET9A1%2Fuseless-projects-3.0)
