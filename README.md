@@ -45,7 +45,7 @@ For Software:
 ### 📥 Installation
 Open this folder as a Gradle project in Android Studio, or skip building and install the APK below. 📦
 
-Prefer a physical phone with WhatsApp installed. 📱 Emulators often lack Google speech recognition and real WhatsApp.
+Prefer a physical phone . 📱 Emulators often lack Google speech recognition and real apps.
 
 ### ▶️ Run
 1. 📦 Install the APK (or Run from Android Studio).
