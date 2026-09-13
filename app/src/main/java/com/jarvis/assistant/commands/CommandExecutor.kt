@@ -1,11 +1,17 @@
 package com.jarvis.assistant.commands
 
+import com.jarvis.assistant.accessibility.GoogleSearchExecutor
+import com.jarvis.assistant.accessibility.GoogleSearchStepResult
 import com.jarvis.assistant.accessibility.JarvisAccessibilityService
+import com.jarvis.assistant.accessibility.SpotifyAccessibilityExecutor
+import com.jarvis.assistant.accessibility.SpotifyStepResult
 import com.jarvis.assistant.accessibility.WhatsAppExecutor
 import com.jarvis.assistant.accessibility.WhatsAppStepResult
 import com.jarvis.assistant.accessibility.YouTubeAccessibilityExecutor
 import com.jarvis.assistant.accessibility.YouTubeStepResult
 import com.jarvis.assistant.android.AppLauncher
+import com.jarvis.assistant.android.TimerAlarmExecutor
+import com.jarvis.assistant.android.TimerAlarmResult
 import kotlinx.coroutines.delay
 
 /**
@@ -20,7 +26,15 @@ class CommandExecutor(
     },
     private val youTubeExecutor: YouTubeAccessibilityExecutor = YouTubeAccessibilityExecutor {
         JarvisAccessibilityService.instance
-    }
+    },
+    private val spotifyExecutor: SpotifyAccessibilityExecutor = SpotifyAccessibilityExecutor {
+        JarvisAccessibilityService.instance
+    },
+    private val timerAlarmExecutor: TimerAlarmExecutor = TimerAlarmExecutor(appLauncher.context),
+    private val googleSearchExecutor: GoogleSearchExecutor = GoogleSearchExecutor(
+        context = appLauncher.context,
+        serviceProvider = { JarvisAccessibilityService.instance }
+    )
 ) {
     suspend fun execute(
         command: JarvisCommand,
@@ -31,6 +45,10 @@ class CommandExecutor(
             is JarvisCommand.SendWhatsAppMessage -> prepareWhatsAppSend(command, onProgress)
             is JarvisCommand.YouTubePlay -> playYouTube(command, onProgress)
             is JarvisCommand.YouTubeSearch -> searchYouTube(command, onProgress)
+            is JarvisCommand.PlaySpotifySong -> playSpotify(command, onProgress)
+            is JarvisCommand.SetTimer -> setTimer(command, onProgress)
+            is JarvisCommand.SetAlarm -> setAlarm(command, onProgress)
+            is JarvisCommand.GoogleSearch -> googleSearch(command, onProgress)
             is JarvisCommand.Unsupported -> CommandResult.Failure(command.reason)
         }
     }
@@ -93,6 +111,15 @@ class CommandExecutor(
             val pkg = result.packageName ?: YouTubeAccessibilityExecutor.PACKAGE_YOUTUBE
             when (val visible = youTubeExecutor.waitForYouTube(pkg)) {
                 is YouTubeStepResult.Failure -> return youtubeFailure(visible)
+                else -> Unit
+            }
+        }
+        if (command.appName.contains("spotify", ignoreCase = true) ||
+            result.packageName == SpotifyAccessibilityExecutor.PACKAGE_SPOTIFY
+        ) {
+            val pkg = result.packageName ?: SpotifyAccessibilityExecutor.PACKAGE_SPOTIFY
+            when (val visible = spotifyExecutor.waitForSpotify(pkg)) {
+                is SpotifyStepResult.Failure -> return spotifyFailure(visible)
                 else -> Unit
             }
         }
@@ -256,6 +283,89 @@ class CommandExecutor(
     }
 
     private fun youtubeFailure(failure: YouTubeStepResult.Failure): CommandResult.Failure {
+        return CommandResult.Failure("${failure.step}: ${failure.message}")
+    }
+
+    private suspend fun playSpotify(
+        command: JarvisCommand.PlaySpotifySong,
+        onProgress: suspend (String) -> Unit
+    ): CommandResult {
+        if (!JarvisAccessibilityService.isConnected()) {
+            return CommandResult.Failure(
+                "Enable the Jarvis Accessibility Service in Android Settings before controlling Spotify."
+            )
+        }
+        onProgress("Opening Spotify…")
+        val launch = appLauncher.openSpotify()
+        if (!launch.success || launch.packageName == null) {
+            return CommandResult.Failure(launch.message)
+        }
+        when (val visible = spotifyExecutor.waitForSpotify(launch.packageName)) {
+            is SpotifyStepResult.Failure -> return spotifyFailure(visible)
+            else -> Unit
+        }
+        delay(700)
+
+        onProgress("Searching for ${command.song}…")
+        when (val typed = spotifyExecutor.openSearchAndEnterQuery(command.song, command.artist)) {
+            is SpotifyStepResult.Failure -> return spotifyFailure(typed)
+            else -> Unit
+        }
+
+        onProgress("Playing ${command.song}…")
+        when (val played = spotifyExecutor.selectAndPlay(command.song, command.artist)) {
+            is SpotifyStepResult.Failure -> return spotifyFailure(played)
+            SpotifyStepResult.Success -> {
+                onProgress("Playing ${command.song}.")
+                return CommandResult.Success
+            }
+        }
+    }
+
+    private suspend fun setTimer(
+        command: JarvisCommand.SetTimer,
+        onProgress: suspend (String) -> Unit
+    ): CommandResult {
+        onProgress("Setting timer…")
+        return when (val result = timerAlarmExecutor.setTimer(command.durationSeconds)) {
+            TimerAlarmResult.Success -> {
+                onProgress("Timer set.")
+                CommandResult.Success
+            }
+            is TimerAlarmResult.Failure -> CommandResult.Failure("${result.step}: ${result.message}")
+        }
+    }
+
+    private suspend fun setAlarm(
+        command: JarvisCommand.SetAlarm,
+        onProgress: suspend (String) -> Unit
+    ): CommandResult {
+        onProgress("Setting alarm…")
+        return when (val result = timerAlarmExecutor.setAlarm(command.hour, command.minute)) {
+            TimerAlarmResult.Success -> {
+                onProgress("Alarm set.")
+                CommandResult.Success
+            }
+            is TimerAlarmResult.Failure -> CommandResult.Failure("${result.step}: ${result.message}")
+        }
+    }
+
+    private suspend fun googleSearch(
+        command: JarvisCommand.GoogleSearch,
+        onProgress: suspend (String) -> Unit
+    ): CommandResult {
+        onProgress("Searching Google…")
+        return when (val result = googleSearchExecutor.search(command.query)) {
+            GoogleSearchStepResult.Success -> {
+                onProgress("Search completed.")
+                CommandResult.Success
+            }
+            is GoogleSearchStepResult.Failure ->
+                CommandResult.Failure("${result.step}: ${result.message}")
+        }
+    }
+
+    private fun spotifyFailure(failure: SpotifyStepResult.Failure): CommandResult.Failure {
         return CommandResult.Failure("${failure.step}: ${failure.message}")
     }
 }

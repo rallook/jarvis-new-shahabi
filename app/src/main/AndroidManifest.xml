@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Normal permission required by AlarmClock.ACTION_SET_ALARM / ACTION_SET_TIMER -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
@@ -16,11 +18,27 @@
         <package android:name="com.whatsapp" />
         <package android:name="com.whatsapp.w4b" />
         <package android:name="com.google.android.youtube" />
+        <package android:name="com.spotify.music" />
+        <package android:name="com.android.chrome" />
+        <package android:name="com.google.android.googlequicksearchbox" />
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.WEB_SEARCH" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SET_ALARM" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SET_TIMER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
         </intent>
     </queries>
 

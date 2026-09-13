@@ -36,6 +36,7 @@ class CommandParser(
             }
             "YOUTUBE_PLAY" -> {
                 val song = response.songName?.trim().orEmpty()
+                    .ifBlank { response.song?.trim().orEmpty() }
                     .ifBlank { response.query?.trim().orEmpty() }
                 if (song.isBlank()) {
                     JarvisCommand.Unsupported("Missing song name for YouTube play.")
@@ -50,6 +51,43 @@ class CommandParser(
                     JarvisCommand.Unsupported("Missing search content for YouTube search.")
                 } else {
                     JarvisCommand.YouTubeSearch(query = query)
+                }
+            }
+            "PLAY_SPOTIFY_SONG" -> {
+                val song = response.song?.trim().orEmpty()
+                    .ifBlank { response.songName?.trim().orEmpty() }
+                    .ifBlank { response.query?.trim().orEmpty() }
+                val artist = response.artist?.trim()?.takeIf { it.isNotBlank() }
+                if (song.isBlank()) {
+                    JarvisCommand.Unsupported("Missing song for Spotify play.")
+                } else {
+                    JarvisCommand.PlaySpotifySong(song = song, artist = artist)
+                }
+            }
+            "SET_TIMER" -> {
+                val seconds = response.durationSeconds
+                if (seconds == null || seconds <= 0) {
+                    JarvisCommand.Unsupported("Missing or invalid durationSeconds for timer.")
+                } else {
+                    JarvisCommand.SetTimer(durationSeconds = seconds)
+                }
+            }
+            "SET_ALARM" -> {
+                val hour = response.hour
+                val minute = response.minute ?: 0
+                if (hour == null || hour !in 0..23 || minute !in 0..59) {
+                    JarvisCommand.Unsupported("Missing or invalid hour/minute for alarm.")
+                } else {
+                    JarvisCommand.SetAlarm(hour = hour, minute = minute)
+                }
+            }
+            "GOOGLE_SEARCH" -> {
+                val query = response.query?.trim().orEmpty()
+                    .ifBlank { response.searchContent?.trim().orEmpty() }
+                if (query.isBlank()) {
+                    JarvisCommand.Unsupported("Missing query for Google search.")
+                } else {
+                    JarvisCommand.GoogleSearch(query = query)
                 }
             }
             else -> JarvisCommand.Unsupported(

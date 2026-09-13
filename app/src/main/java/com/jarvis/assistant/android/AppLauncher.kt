@@ -8,7 +8,7 @@ import com.jarvis.assistant.MainActivity
 /**
  * Launches apps via normal Android intents. Accessibility is not used for launch.
  */
-class AppLauncher(private val context: Context) {
+class AppLauncher(val context: Context) {
 
     data class LaunchResult(
         val success: Boolean,
@@ -33,6 +33,13 @@ class AppLauncher(private val context: Context) {
         return LaunchResult(false, null, "YouTube is not installed.")
     }
 
+    fun openSpotify(): LaunchResult {
+        if (isInstalled(PACKAGE_SPOTIFY)) {
+            return launchPackage(PACKAGE_SPOTIFY, "Spotify")
+        }
+        return LaunchResult(false, null, "Spotify is not installed.")
+    }
+
     fun openApp(appName: String, packageName: String? = null): LaunchResult {
         if (!packageName.isNullOrBlank()) {
             return launchPackage(packageName, appName)
@@ -42,6 +49,9 @@ class AppLauncher(private val context: Context) {
         }
         if (appName.contains("youtube", ignoreCase = true)) {
             return openYouTube()
+        }
+        if (appName.contains("spotify", ignoreCase = true)) {
+            return openSpotify()
         }
         val resolved = resolvePackageByLabel(appName)
             ?: return LaunchResult(false, null, "Could not find app \"$appName\".")
@@ -109,5 +119,6 @@ class AppLauncher(private val context: Context) {
         const val PACKAGE_WHATSAPP = "com.whatsapp"
         const val PACKAGE_WHATSAPP_BUSINESS = "com.whatsapp.w4b"
         const val PACKAGE_YOUTUBE = "com.google.android.youtube"
+        const val PACKAGE_SPOTIFY = "com.spotify.music"
     }
 }

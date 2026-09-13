@@ -401,6 +401,34 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             is JarvisCommand.SendWhatsAppMessage -> runWhatsAppPipeline(command)
             is JarvisCommand.YouTubePlay -> runYouTubePlay(command)
             is JarvisCommand.YouTubeSearch -> runYouTubeSearch(command)
+            is JarvisCommand.PlaySpotifySong -> runSimpleAutomation(
+                speaking = "Opening Spotify.",
+                executingMessage = "Opening Spotify…",
+                command = command,
+                successSpeak = "Playing ${command.song}.",
+                successMessage = "Playing ${command.song}."
+            )
+            is JarvisCommand.SetTimer -> runSimpleAutomation(
+                speaking = "Setting a timer.",
+                executingMessage = "Setting timer…",
+                command = command,
+                successSpeak = "Timer set.",
+                successMessage = "Timer set."
+            )
+            is JarvisCommand.SetAlarm -> runSimpleAutomation(
+                speaking = "Setting an alarm.",
+                executingMessage = "Setting alarm…",
+                command = command,
+                successSpeak = "Alarm set.",
+                successMessage = "Alarm set."
+            )
+            is JarvisCommand.GoogleSearch -> runSimpleAutomation(
+                speaking = "Searching Google.",
+                executingMessage = "Searching Google…",
+                command = command,
+                successSpeak = "Search completed.",
+                successMessage = "Search completed."
+            )
             is JarvisCommand.OpenApp -> {
                 setPhase(JarvisPhase.EXECUTING, "Working…", "Opening ${command.appName}…")
                 when (val result = executor.execute(command) { msg ->
@@ -409,13 +437,41 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     CommandResult.Success -> {
                         speak("${command.appName} is open.")
                         setPhase(JarvisPhase.COMPLETED, "Completed", "${command.appName} opened.")
-                        // Keep COMPLETED visible until the user dismisses the floating panel.
                     }
                     is CommandResult.Failure -> fail(result.message)
                     else -> fail("Unexpected result.")
                 }
             }
             is JarvisCommand.Unsupported -> fail(command.reason)
+        }
+    }
+
+    private suspend fun runSimpleAutomation(
+        speaking: String,
+        executingMessage: String,
+        command: JarvisCommand,
+        successSpeak: String,
+        successMessage: String
+    ) {
+        presentJarvisUiAfterAutomation()
+        setPhase(JarvisPhase.EXECUTING, "Working…", executingMessage)
+        speak(speaking)
+        when (val result = executor.execute(command) { progress ->
+            presentJarvisUiAfterAutomation()
+            _uiState.update {
+                it.copy(assistantMessage = progress, statusText = "Working…")
+            }
+        }) {
+            CommandResult.Success -> {
+                presentJarvisUiAfterAutomation()
+                setPhase(JarvisPhase.COMPLETED, "Completed", successMessage)
+                speak(successSpeak)
+            }
+            is CommandResult.Failure -> {
+                presentJarvisUiAfterAutomation()
+                fail(result.message)
+            }
+            else -> fail("Unexpected result.")
         }
     }
 

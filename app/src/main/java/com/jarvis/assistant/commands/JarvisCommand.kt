@@ -4,8 +4,8 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
- * Extensible action catalog. WhatsApp + YouTube are implemented; remaining
- * types reserve the future agent surface (Instagram, Chrome, Spotify, etc.).
+ * Extensible action catalog. WhatsApp + YouTube remain implemented;
+ * Spotify, timer/alarm, and Google search extend the same surface.
  */
 @Serializable
 enum class ActionType {
@@ -13,6 +13,10 @@ enum class ActionType {
     SEND_WHATSAPP_MESSAGE,
     YOUTUBE_PLAY,
     YOUTUBE_SEARCH,
+    PLAY_SPOTIFY_SONG,
+    SET_TIMER,
+    SET_ALARM,
+    GOOGLE_SEARCH,
     CLICK,
     LONG_CLICK,
     TYPE,
@@ -64,6 +68,40 @@ sealed class JarvisCommand {
     }
 
     @Serializable
+    @SerialName("PLAY_SPOTIFY_SONG")
+    data class PlaySpotifySong(
+        val song: String,
+        val artist: String? = null
+    ) : JarvisCommand() {
+        override val action: ActionType = ActionType.PLAY_SPOTIFY_SONG
+    }
+
+    @Serializable
+    @SerialName("SET_TIMER")
+    data class SetTimer(
+        val durationSeconds: Int
+    ) : JarvisCommand() {
+        override val action: ActionType = ActionType.SET_TIMER
+    }
+
+    @Serializable
+    @SerialName("SET_ALARM")
+    data class SetAlarm(
+        val hour: Int,
+        val minute: Int
+    ) : JarvisCommand() {
+        override val action: ActionType = ActionType.SET_ALARM
+    }
+
+    @Serializable
+    @SerialName("GOOGLE_SEARCH")
+    data class GoogleSearch(
+        val query: String
+    ) : JarvisCommand() {
+        override val action: ActionType = ActionType.GOOGLE_SEARCH
+    }
+
+    @Serializable
     @SerialName("UNSUPPORTED")
     data class Unsupported(
         val reason: String,
@@ -81,8 +119,13 @@ data class BrainResponse(
     val appName: String? = null,
     val packageName: String? = null,
     val songName: String? = null,
+    val song: String? = null,
+    val artist: String? = null,
     val query: String? = null,
     val searchContent: String? = null,
+    val durationSeconds: Int? = null,
+    val hour: Int? = null,
+    val minute: Int? = null,
     val reason: String? = null
 )
 

@@ -157,6 +157,19 @@ object AccessibilityNodeFinder {
     }
 
     /**
+     * ACTION_CLICK first; if it fails, tap the node's getBoundsInScreen() center
+     * via [JarvisAccessibilityService.dispatchTapOnNode]. Never uses hard-coded coords.
+     */
+    suspend fun clickOrGesture(
+        service: JarvisAccessibilityService,
+        node: AccessibilityNodeInfo?
+    ): Boolean {
+        if (node == null) return false
+        if (performClick(node)) return true
+        return service.dispatchTapOnNode(node)
+    }
+
+    /**
      * Best-effort text entry: ACTION_SET_TEXT first, then clipboard paste.
      * Does not log [text] contents (callers decide what to log).
      */
