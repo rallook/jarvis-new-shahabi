@@ -12,6 +12,7 @@ import com.jarvis.assistant.android.AppLauncher
 import com.jarvis.assistant.commands.CommandExecutor
 import com.jarvis.assistant.commands.CommandResult
 import com.jarvis.assistant.commands.JarvisCommand
+import com.jarvis.assistant.overlay.JarvisOverlayController
 import com.jarvis.assistant.settings.JarvisSettings
 import com.jarvis.assistant.settings.SettingsRepository
 import com.jarvis.assistant.tts.JarvisTTS
@@ -36,6 +37,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val appLauncher = AppLauncher(application)
     private val executor = CommandExecutor(appLauncher)
     private val tts = JarvisTTS(application)
+    private val overlay = JarvisOverlayController.getInstance(application)
 
     private val _uiState = MutableStateFlow(JarvisUiState())
     val uiState: StateFlow<JarvisUiState> = _uiState.asStateFlow()
@@ -48,6 +50,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private var lastHandledTranscription: String? = null
 
     init {
+        overlay.hostCallbacks = object : JarvisOverlayController.HostCallbacks {
+            override fun onToggleListening() = toggleListening()
+            override fun onConfirmSend() = confirmSend()
+            override fun onCancelSend() = cancelSend()
+            override fun onSelectContact(choice: String) = selectContact(choice)
+            override fun onSubmitTextCommand(text: String) = submitTextCommand(text)
+        }
         refreshSetupFlags()
         refreshSettingsState()
         viewModelScope.launch {
@@ -56,6 +65,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     it.copy(settings = settings, savedMessage = it.savedMessage)
                 }
             }
+        }
+        viewModelScope.launch {
+            _uiState.collect { overlay.publishState(it) }
         }
         speechCollectJob = viewModelScope.launch {
             speech.state.collect { speechState ->
@@ -109,13 +121,26 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun onHostForegroundChanged(inForeground: Boolean) {
+        overlay.setHostInForeground(inForeground)
+    }
+
+    fun requestOverlayPermissionIntent(): android.content.Intent = overlay.overlayPermissionIntent()
+
+    fun dismissFloatingPanel() {
+        // Dismiss UI only — do not stop speech recognition or pipelines.
+        overlay.dismissOverlay()
+    }
+
     fun refreshSetupFlags() {
         val app = getApplication<Application>()
         val accessibility = AccessibilityUtils.isJarvisAccessibilityEnabled(app) ||
             JarvisAccessibilityService.isConnected()
+        val overlayGranted = overlay.canDrawOverlays()
         _uiState.update {
             it.copy(
                 needsAccessibility = !accessibility,
+                needsOverlayPermission = !overlayGranted,
                 setupComplete = accessibility && !it.needsMicrophone
             )
         }
@@ -127,11 +152,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val accessibility = AccessibilityUtils.isJarvisAccessibilityEnabled(app) ||
             JarvisAccessibilityService.isConnected()
         val micGranted = !_uiState.value.needsMicrophone
+        val overlayGranted = overlay.canDrawOverlays()
         _settingsState.update {
             it.copy(
                 settings = settingsRepository.get(),
                 accessibilityEnabled = accessibility,
-                microphoneGranted = micGranted
+                microphoneGranted = micGranted,
+                overlayGranted = overlayGranted
             )
         }
     }
@@ -294,7 +321,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     it.copy(assistantMessage = progress, statusText = "Working…")
                 }
             }
-            appLauncher.bringJarvisToForeground()
+            presentJarvisUiAfterAutomation()
             delay(300)
             when (result) {
                 CommandResult.Success -> {
@@ -371,6 +398,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun runCommand(command: JarvisCommand) {
         when (command) {
             is JarvisCommand.SendWhatsAppMessage -> runWhatsAppPipeline(command)
+            is JarvisCommand.YouTubePlay -> runYouTubePlay(command)
+            is JarvisCommand.YouTubeSearch -> runYouTubeSearch(command)
             is JarvisCommand.OpenApp -> {
                 setPhase(JarvisPhase.EXECUTING, "Working…", "Opening ${command.appName}…")
                 when (val result = executor.execute(command) { msg ->
@@ -390,6 +419,48 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private suspend fun runYouTubePlay(command: JarvisCommand.YouTubePlay) {
+        setPhase(JarvisPhase.EXECUTING, "Working…", "Opening YouTube…")
+        speak("Opening YouTube.")
+        when (val result = executor.execute(command) { progress ->
+            _uiState.update {
+                it.copy(assistantMessage = progress, statusText = "Working…")
+            }
+        }) {
+            CommandResult.Success -> {
+                setPhase(JarvisPhase.COMPLETED, "Completed", "Playing ${command.songName}.")
+                speak("Playing ${command.songName}.")
+                delay(2000)
+                resetToIdle()
+            }
+            is CommandResult.Failure -> fail(result.message)
+            else -> fail("Unexpected YouTube result.")
+        }
+    }
+
+    private suspend fun runYouTubeSearch(command: JarvisCommand.YouTubeSearch) {
+        setPhase(JarvisPhase.EXECUTING, "Working…", "Opening YouTube…")
+        speak("Searching YouTube.")
+        when (val result = executor.execute(command) { progress ->
+            _uiState.update {
+                it.copy(assistantMessage = progress, statusText = "Working…")
+            }
+        }) {
+            CommandResult.Success -> {
+                setPhase(
+                    JarvisPhase.COMPLETED,
+                    "Completed",
+                    "Showing YouTube results for ${command.query}."
+                )
+                speak("Here are the results.")
+                delay(2000)
+                resetToIdle()
+            }
+            is CommandResult.Failure -> fail(result.message)
+            else -> fail("Unexpected YouTube result.")
+        }
+    }
+
     private suspend fun runWhatsAppPipeline(command: JarvisCommand.SendWhatsAppMessage) {
         setPhase(JarvisPhase.EXECUTING, "Working…", "Opening WhatsApp…")
         speak("Opening WhatsApp.")
@@ -404,7 +475,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
         }) {
             is CommandResult.NeedsConfirmation -> {
-                appLauncher.bringJarvisToForeground()
+                presentJarvisUiAfterAutomation()
                 delay(350)
                 _uiState.update {
                     it.copy(
@@ -424,7 +495,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 speak("Ready to send. Please confirm.")
             }
             is CommandResult.NeedsContactChoice -> {
-                appLauncher.bringJarvisToForeground()
+                presentJarvisUiAfterAutomation()
                 delay(350)
                 _uiState.update {
                     it.copy(
@@ -444,7 +515,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 speak("Multiple contacts found.")
             }
             is CommandResult.Failure -> {
-                appLauncher.bringJarvisToForeground()
+                presentJarvisUiAfterAutomation()
                 fail(result.message)
             }
             CommandResult.Success -> {
@@ -454,6 +525,19 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
             is CommandResult.Progress -> Unit
         }
+    }
+
+    /**
+     * Prefer the floating overlay while other apps stay in front. Only bring
+     * Jarvis Activity forward when overlay permission is not available.
+     */
+    private fun presentJarvisUiAfterAutomation() {
+        if (overlay.canDrawOverlays()) {
+            // Keep WhatsApp / YouTube in front; overlay shows confirmation / status.
+            overlay.setHostInForeground(false)
+            return
+        }
+        appLauncher.bringJarvisToForeground()
     }
 
     private fun setPhase(phase: JarvisPhase, status: String, message: String) {
@@ -493,6 +577,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 statusText = "Ready",
                 needsMicrophone = it.needsMicrophone,
                 needsAccessibility = it.needsAccessibility,
+                needsOverlayPermission = it.needsOverlayPermission,
                 setupComplete = it.setupComplete
             )
         }
@@ -530,6 +615,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         speech.destroy()
         tts.shutdown()
         stopMicForeground()
+        // Remove floating panel to avoid duplicates; leave Accessibility / FG service alone.
+        overlay.dismissOverlay()
+        overlay.hostCallbacks = null
         super.onCleared()
     }
 }

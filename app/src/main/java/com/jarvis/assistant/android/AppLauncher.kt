@@ -26,12 +26,22 @@ class AppLauncher(private val context: Context) {
         return LaunchResult(false, null, "WhatsApp is not installed.")
     }
 
+    fun openYouTube(): LaunchResult {
+        if (isInstalled(PACKAGE_YOUTUBE)) {
+            return launchPackage(PACKAGE_YOUTUBE, "YouTube")
+        }
+        return LaunchResult(false, null, "YouTube is not installed.")
+    }
+
     fun openApp(appName: String, packageName: String? = null): LaunchResult {
         if (!packageName.isNullOrBlank()) {
             return launchPackage(packageName, appName)
         }
         if (appName.contains("whatsapp", ignoreCase = true)) {
             return openWhatsApp()
+        }
+        if (appName.contains("youtube", ignoreCase = true)) {
+            return openYouTube()
         }
         val resolved = resolvePackageByLabel(appName)
             ?: return LaunchResult(false, null, "Could not find app \"$appName\".")
@@ -98,5 +108,6 @@ class AppLauncher(private val context: Context) {
     companion object {
         const val PACKAGE_WHATSAPP = "com.whatsapp"
         const val PACKAGE_WHATSAPP_BUSINESS = "com.whatsapp.w4b"
+        const val PACKAGE_YOUTUBE = "com.google.android.youtube"
     }
 }

@@ -64,7 +64,11 @@ class MainActivity : ComponentActivity() {
                             onSubmitTextCommand = viewModel::submitTextCommand,
                             onOpenSettings = { navController.navigate("settings") },
                             onRefreshSetup = viewModel::refreshSetupFlags,
-                            showSetup = state.needsMicrophone || state.needsAccessibility
+                            onRequestOverlayPermission = {
+                                startActivity(viewModel.requestOverlayPermissionIntent())
+                            },
+                            showSetup = state.needsMicrophone || state.needsAccessibility,
+                            needsOverlayPermission = state.needsOverlayPermission
                         )
                     }
                     composable("settings") {
@@ -83,7 +87,10 @@ class MainActivity : ComponentActivity() {
                             onToggleHeuristic = viewModel::setHeuristicFallback,
                             onToggleTts = viewModel::setTtsEnabled,
                             onRefreshStatus = viewModel::refreshSettingsState,
-                            onRequestMicrophone = { requestNeededPermissions() }
+                            onRequestMicrophone = { requestNeededPermissions() },
+                            onRequestOverlayPermission = {
+                                startActivity(viewModel.requestOverlayPermissionIntent())
+                            }
                         )
                     }
                 }
@@ -93,12 +100,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        viewModel.onHostForegroundChanged(true)
         viewModel.refreshSetupFlags()
         val micGranted = ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
         viewModel.onMicrophonePermissionResult(micGranted)
+    }
+
+    override fun onPause() {
+        viewModel.onHostForegroundChanged(false)
+        super.onPause()
     }
 
     private fun requestNeededPermissions() {

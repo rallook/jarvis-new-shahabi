@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Jarvis</string>
-    <string name="accessibility_service_description">Jarvis uses Accessibility to locate WhatsApp chats, type messages, and verify results. Jarvis never sends a message without your confirmation.</string>
+    <string name="accessibility_service_description">Jarvis uses Accessibility to automate supported apps such as WhatsApp and YouTube — locate controls, type text, start playback, and verify results. Jarvis never sends a WhatsApp message without your confirmation.</string>
+    <string name="overlay_permission_title">Display over other apps</string>
+    <string name="overlay_permission_body">Allow Jarvis to show its voice panel above other apps. Jarvis cannot grant this permission automatically.</string>
+    <string name="overlay_service_notification">Jarvis floating panel ready</string>
     <string name="speech_service_channel">Jarvis voice</string>
     <string name="speech_service_notification">Listening for your command</string>
     <string name="setup_accessibility_title">Enable Accessibility</string>

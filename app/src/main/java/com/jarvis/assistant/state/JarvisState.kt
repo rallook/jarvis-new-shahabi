@@ -43,5 +43,6 @@ data class JarvisUiState(
     val audioLevel: Float = 0f,
     val needsMicrophone: Boolean = false,
     val needsAccessibility: Boolean = false,
+    val needsOverlayPermission: Boolean = false,
     val setupComplete: Boolean = false
 )
