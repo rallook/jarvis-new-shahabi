@@ -56,6 +56,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             override fun onCancelSend() = cancelSend()
             override fun onSelectContact(choice: String) = selectContact(choice)
             override fun onSubmitTextCommand(text: String) = submitTextCommand(text)
+            override fun onDismissPanel() = dismissFloatingPanel()
         }
         refreshSetupFlags()
         refreshSettingsState()
@@ -128,8 +129,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun requestOverlayPermissionIntent(): android.content.Intent = overlay.overlayPermissionIntent()
 
     fun dismissFloatingPanel() {
-        // Dismiss UI only — do not stop speech recognition or pipelines.
+        // User-initiated only (X / swipe). Do not stop speech pipelines here.
         overlay.dismissOverlay()
+        resetToIdle()
     }
 
     fun refreshSetupFlags() {
@@ -331,8 +333,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         "Message sent to ${pending.contact}."
                     )
                     speak("Message sent.")
-                    delay(2200)
-                    resetToIdle()
+                    // Keep COMPLETED visible until the user dismisses the floating panel.
                 }
                 is CommandResult.Failure -> fail(result.message)
                 else -> fail("Unexpected send result.")
@@ -408,8 +409,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     CommandResult.Success -> {
                         speak("${command.appName} is open.")
                         setPhase(JarvisPhase.COMPLETED, "Completed", "${command.appName} opened.")
-                        delay(1800)
-                        resetToIdle()
+                        // Keep COMPLETED visible until the user dismisses the floating panel.
                     }
                     is CommandResult.Failure -> fail(result.message)
                     else -> fail("Unexpected result.")
@@ -420,43 +420,53 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun runYouTubePlay(command: JarvisCommand.YouTubePlay) {
+        presentJarvisUiAfterAutomation()
         setPhase(JarvisPhase.EXECUTING, "Working…", "Opening YouTube…")
         speak("Opening YouTube.")
         when (val result = executor.execute(command) { progress ->
+            presentJarvisUiAfterAutomation()
             _uiState.update {
                 it.copy(assistantMessage = progress, statusText = "Working…")
             }
         }) {
             CommandResult.Success -> {
+                presentJarvisUiAfterAutomation()
                 setPhase(JarvisPhase.COMPLETED, "Completed", "Playing ${command.songName}.")
                 speak("Playing ${command.songName}.")
-                delay(2000)
-                resetToIdle()
+                // Keep COMPLETED visible until the user dismisses the floating panel.
             }
-            is CommandResult.Failure -> fail(result.message)
+            is CommandResult.Failure -> {
+                presentJarvisUiAfterAutomation()
+                fail(result.message)
+            }
             else -> fail("Unexpected YouTube result.")
         }
     }
 
     private suspend fun runYouTubeSearch(command: JarvisCommand.YouTubeSearch) {
+        presentJarvisUiAfterAutomation()
         setPhase(JarvisPhase.EXECUTING, "Working…", "Opening YouTube…")
         speak("Searching YouTube.")
         when (val result = executor.execute(command) { progress ->
+            presentJarvisUiAfterAutomation()
             _uiState.update {
                 it.copy(assistantMessage = progress, statusText = "Working…")
             }
         }) {
             CommandResult.Success -> {
+                presentJarvisUiAfterAutomation()
                 setPhase(
                     JarvisPhase.COMPLETED,
                     "Completed",
                     "Showing YouTube results for ${command.query}."
                 )
                 speak("Here are the results.")
-                delay(2000)
-                resetToIdle()
+                // Keep COMPLETED visible until the user dismisses the floating panel.
             }
-            is CommandResult.Failure -> fail(result.message)
+            is CommandResult.Failure -> {
+                presentJarvisUiAfterAutomation()
+                fail(result.message)
+            }
             else -> fail("Unexpected YouTube result.")
         }
     }
@@ -520,8 +530,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
             CommandResult.Success -> {
                 setPhase(JarvisPhase.COMPLETED, "Completed", "Done.")
-                delay(1500)
-                resetToIdle()
+                // Keep COMPLETED visible until the user dismisses the floating panel.
             }
             is CommandResult.Progress -> Unit
         }
@@ -564,10 +573,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         speak("Something went wrong.")
-        viewModelScope.launch {
-            delay(3500)
-            if (_uiState.value.phase == JarvisPhase.ERROR) resetToIdle()
-        }
+        // Keep ERROR visible until the user dismisses the floating panel.
     }
 
     private fun resetToIdle() {
@@ -615,8 +621,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         speech.destroy()
         tts.shutdown()
         stopMicForeground()
-        // Remove floating panel to avoid duplicates; leave Accessibility / FG service alone.
-        overlay.dismissOverlay()
+        // Do not dismiss the floating panel or stop AccessibilityService here.
+        // Activity recreation must not permanently tear down Jarvis overlay state;
+        // the next ViewModel rebinds hostCallbacks. User dismisses via X / swipe.
         overlay.hostCallbacks = null
         super.onCleared()
     }

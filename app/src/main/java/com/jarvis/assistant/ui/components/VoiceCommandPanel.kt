@@ -6,7 +6,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,7 +49,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.IntOffset
@@ -59,6 +62,7 @@ import com.jarvis.assistant.ui.theme.ButtonShape
 import com.jarvis.assistant.ui.theme.PanelShape
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -77,6 +81,7 @@ fun VoiceCommandPanel(
     modifier: Modifier = Modifier,
     showDismissControls: Boolean = false,
     onDismiss: (() -> Unit)? = null,
+    onDismissDragActive: ((Boolean) -> Unit)? = null,
     compact: Boolean = false
 ) {
     var typedCommand by remember { mutableStateOf("") }
@@ -88,6 +93,7 @@ fun VoiceCommandPanel(
     ) && !state.isListening
 
     val density = LocalDensity.current
+    val viewConfiguration = LocalViewConfiguration.current
     val scope = rememberCoroutineScope()
     var dragOffsetPx by remember { mutableFloatStateOf(0f) }
     var dismissing by remember { mutableStateOf(false) }
@@ -95,7 +101,8 @@ fun VoiceCommandPanel(
     fun animateDismiss() {
         if (dismissing || onDismiss == null) return
         dismissing = true
-                scope.launch {
+        onDismissDragActive?.invoke(false)
+        scope.launch {
             val target = with(density) { 420.dp.toPx() }
             while (dragOffsetPx < target) {
                 dragOffsetPx += target / 10f
@@ -103,6 +110,11 @@ fun VoiceCommandPanel(
             }
             onDismiss()
         }
+    }
+
+    fun cancelDrag() {
+        dragOffsetPx = 0f
+        onDismissDragActive?.invoke(false)
     }
 
     Surface(
@@ -114,22 +126,41 @@ fun VoiceCommandPanel(
             .then(
                 if (showDismissControls && onDismiss != null) {
                     Modifier.pointerInput(Unit) {
-                        detectVerticalDragGestures(
-                            onDragEnd = {
-                                val threshold = with(density) { 96.dp.toPx() }
-                                if (dragOffsetPx > threshold) {
-                                    animateDismiss()
-                                } else {
-                                    dragOffsetPx = 0f
+                        val touchSlop = viewConfiguration.touchSlop
+                        val dismissThreshold = with(density) { 96.dp.toPx() }
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var dragging = false
+                            var totalDown = 0f
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull() ?: break
+                                if (!change.pressed) {
+                                    if (dragging) {
+                                        if (dragOffsetPx > dismissThreshold) {
+                                            animateDismiss()
+                                        } else {
+                                            cancelDrag()
+                                        }
+                                    }
+                                    break
                                 }
-                            },
-                            onVerticalDrag = { change, dragAmount ->
-                                change.consume()
-                                if (dragAmount > 0 || dragOffsetPx > 0) {
-                                    dragOffsetPx = (dragOffsetPx + dragAmount).coerceAtLeast(0f)
+                                val delta = change.positionChange()
+                                // Prefer vertical downward dismiss; leave taps/buttons alone.
+                                if (!dragging) {
+                                    totalDown += delta.y
+                                    if (totalDown > touchSlop && abs(delta.y) >= abs(delta.x)) {
+                                        dragging = true
+                                        onDismissDragActive?.invoke(true)
+                                    }
+                                }
+                                if (dragging) {
+                                    change.consume()
+                                    dragOffsetPx =
+                                        (dragOffsetPx + delta.y).coerceAtLeast(0f)
                                 }
                             }
-                        )
+                        }
                     }
                 } else {
                     Modifier

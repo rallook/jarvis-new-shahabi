@@ -41,8 +41,11 @@ import kotlinx.coroutines.launch
 
 /**
  * Floating Jarvis voice panel over other apps. Uses the same Material panel
- * design as the in-app UI. Dismissing the overlay never stops recognition or
- * command pipelines — only removes the window.
+ * design as the in-app UI. Dismissing the overlay never stops recognition,
+ * AccessibilityService, or command pipelines — only removes the window.
+ *
+ * The panel stays visible through COMPLETED / ERROR until the user dismisses
+ * it (X or swipe-down). Task completion must never auto-remove the window.
  */
 class JarvisOverlayController private constructor(
     private val appContext: Context
@@ -53,6 +56,7 @@ class JarvisOverlayController private constructor(
         fun onCancelSend()
         fun onSelectContact(choice: String)
         fun onSubmitTextCommand(text: String)
+        fun onDismissPanel()
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -73,6 +77,8 @@ class JarvisOverlayController private constructor(
     private var composeView: ComposeView? = null
     private var lifecycleOwner: OverlayLifecycleOwner? = null
     private var collectJob: Job? = null
+    private var layoutParams: WindowManager.LayoutParams? = null
+    private var draggingPanel = false
 
     fun publishState(state: JarvisUiState) {
         _uiState.value = state
@@ -95,6 +101,7 @@ class JarvisOverlayController private constructor(
 
     fun dismissOverlay() {
         _userDismissed.value = true
+        draggingPanel = false
         hideOverlayWindow()
     }
 
@@ -141,7 +148,9 @@ class JarvisOverlayController private constructor(
     }
 
     private fun shouldShowForPhase(state: JarvisUiState): Boolean {
-        return state.isListening || state.phase !in setOf(JarvisPhase.IDLE)
+        // Keep panel for listening and any non-idle phase including COMPLETED / ERROR.
+        // Idle alone (and not listening) hides — only after user dismiss resets to idle.
+        return state.isListening || state.phase != JarvisPhase.IDLE
     }
 
     private fun showOverlayWindow() {
@@ -173,7 +182,11 @@ class JarvisOverlayController private constructor(
                                     JarvisPhase.VERIFYING
                                 ),
                             showDismissControls = true,
-                            onDismiss = { dismissOverlay() },
+                            onDismiss = {
+                                // User X / swipe only — never auto-dismiss on task completion.
+                                hostCallbacks?.onDismissPanel() ?: dismissOverlay()
+                            },
+                            onDismissDragActive = { active -> setPanelDragging(active) },
                             compact = true,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -194,14 +207,12 @@ class JarvisOverlayController private constructor(
                 },
                 // NOT_FOCUSABLE keeps YouTube/WhatsApp audio & focus; NOT_TOUCH_MODAL
                 // lets touches outside the panel reach the underlying app.
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                baseOverlayFlags(),
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.BOTTOM
             }
+            layoutParams = params
             windowManager.addView(view, params)
             owner.onStart()
             owner.onResume()
@@ -212,8 +223,37 @@ class JarvisOverlayController private constructor(
             Log.e(TAG, "Failed to show overlay", t)
             composeView = null
             lifecycleOwner = null
+            layoutParams = null
             _overlayVisible.value = false
         }
+    }
+
+    private fun setPanelDragging(active: Boolean) {
+        if (draggingPanel == active) return
+        draggingPanel = active
+        val view = composeView ?: return
+        val params = layoutParams ?: return
+        // While dragging, drop NOT_TOUCH_MODAL so the swipe isn't delivered
+        // to the underlying app if the finger drifts outside the panel.
+        params.flags = if (active) {
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+        } else {
+            baseOverlayFlags()
+        }
+        try {
+            windowManager.updateViewLayout(view, params)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to update overlay drag flags", t)
+        }
+    }
+
+    private fun baseOverlayFlags(): Int {
+        return WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
     }
 
     private fun hideOverlayWindow() {
@@ -231,6 +271,8 @@ class JarvisOverlayController private constructor(
         } finally {
             composeView = null
             lifecycleOwner = null
+            layoutParams = null
+            draggingPanel = false
             _overlayVisible.value = false
             Log.i(TAG, "Floating Jarvis panel hidden")
         }
