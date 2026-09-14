@@ -7,6 +7,8 @@
     <string name="overlay_service_notification">Jarvis floating panel ready</string>
     <string name="speech_service_channel">Jarvis voice</string>
     <string name="speech_service_notification">Listening for your command</string>
+    <string name="wake_service_notification">Listening for “Jarvis”</string>
+    <string name="voice_interaction_service_label">Jarvis voice assistant</string>
     <string name="setup_accessibility_title">Enable Accessibility</string>
     <string name="setup_accessibility_body">Android requires you to manually enable the Jarvis Accessibility Service in system settings. Jarvis cannot enable this for you.</string>
     <string name="setup_mic_title">Microphone permission</string>

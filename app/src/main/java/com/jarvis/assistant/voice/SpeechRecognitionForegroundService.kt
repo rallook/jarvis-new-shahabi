@@ -13,8 +13,9 @@ import com.jarvis.assistant.R
 
 /**
  * Foreground microphone service required on newer Android versions when
- * capturing audio while the app may briefly lose focus during WhatsApp handoff.
- * Recognition itself remains in [SpeechRecognizerManager].
+ * capturing audio while the app may briefly lose focus during WhatsApp handoff,
+ * or while hands-free wake listening is active.
+ * Recognition itself remains in [SpeechRecognizerManager] / [com.jarvis.assistant.wake.WakeWordEngine].
  */
 class SpeechRecognitionForegroundService : Service() {
 
@@ -27,16 +28,24 @@ class SpeechRecognitionForegroundService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            else -> startAsForeground()
+            else -> {
+                val mode = intent?.getStringExtra(EXTRA_MODE) ?: MODE_COMMAND
+                startAsForeground(mode)
+            }
         }
         return START_STICKY
     }
 
-    private fun startAsForeground() {
+    private fun startAsForeground(mode: String) {
         ensureChannel()
+        val text = if (mode == MODE_WAKE) {
+            getString(R.string.wake_service_notification)
+        } else {
+            getString(R.string.speech_service_notification)
+        }
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(R.string.speech_service_notification))
+            .setContentText(text)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .build()
@@ -66,6 +75,9 @@ class SpeechRecognitionForegroundService : Service() {
     companion object {
         const val ACTION_START = "com.jarvis.assistant.voice.START"
         const val ACTION_STOP = "com.jarvis.assistant.voice.STOP"
+        const val EXTRA_MODE = "mode"
+        const val MODE_COMMAND = "command"
+        const val MODE_WAKE = "wake"
         private const val CHANNEL_ID = "jarvis_mic"
         private const val NOTIFICATION_ID = 42
     }

@@ -16,6 +16,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.jarvis.assistant.assistant.AssistantRoleHelper
 import com.jarvis.assistant.state.JarvisViewModel
 import com.jarvis.assistant.ui.MainScreen
 import com.jarvis.assistant.ui.SettingsScreen
@@ -33,6 +34,12 @@ class MainActivity : ComponentActivity() {
             PackageManager.PERMISSION_GRANTED
         viewModel.onMicrophonePermissionResult(micGranted)
         viewModel.refreshSetupFlags()
+    }
+
+    private val assistantRoleLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        viewModel.refreshSettingsState()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -86,11 +93,13 @@ class MainActivity : ComponentActivity() {
                             onUpdateBackendUrl = viewModel::updateSecureBackendUrl,
                             onToggleHeuristic = viewModel::setHeuristicFallback,
                             onToggleTts = viewModel::setTtsEnabled,
+                            onToggleHandsFree = viewModel::setHandsFreeEnabled,
                             onRefreshStatus = viewModel::refreshSettingsState,
                             onRequestMicrophone = { requestNeededPermissions() },
                             onRequestOverlayPermission = {
                                 startActivity(viewModel.requestOverlayPermissionIntent())
-                            }
+                            },
+                            onRequestAssistantRole = { requestAssistantRole() }
                         )
                     }
                 }
@@ -112,6 +121,15 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         viewModel.onHostForegroundChanged(false)
         super.onPause()
+    }
+
+    private fun requestAssistantRole() {
+        val intent = AssistantRoleHelper.createRequestRoleIntent(this)
+        if (intent != null) {
+            assistantRoleLauncher.launch(intent)
+        } else {
+            AssistantRoleHelper.openAssistantSettings(this)
+        }
     }
 
     private fun requestNeededPermissions() {

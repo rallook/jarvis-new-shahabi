@@ -18,7 +18,9 @@ data class JarvisSettings(
     val secureBackendUrl: String = "",
     val allowHeuristicFallback: Boolean = true,
     val ttsEnabled: Boolean = true,
-    val requireSendConfirmation: Boolean = true
+    val requireSendConfirmation: Boolean = true,
+    /** When true, listen for “Jarvis” / “Hey Jarvis” to activate the mic. */
+    val handsFreeEnabled: Boolean = true
 ) {
     val hasOpenAiKey: Boolean
         get() = openAiApiKey.isNotBlank() || BuildConfig.OPENAI_API_KEY.isNotBlank()
@@ -99,7 +101,8 @@ class SettingsRepository(context: Context) {
             secureBackendUrl = prefs.getString(KEY_BACKEND_URL, "").orEmpty(),
             allowHeuristicFallback = prefs.getBoolean(KEY_HEURISTIC, true),
             ttsEnabled = prefs.getBoolean(KEY_TTS, true),
-            requireSendConfirmation = prefs.getBoolean(KEY_CONFIRM, true)
+            requireSendConfirmation = prefs.getBoolean(KEY_CONFIRM, true),
+            handsFreeEnabled = prefs.getBoolean(KEY_HANDS_FREE, true)
         )
     }
 
@@ -114,6 +117,7 @@ class SettingsRepository(context: Context) {
             putBoolean(KEY_TTS, settings.ttsEnabled)
             // Confirmation is always enforced in v1.
             putBoolean(KEY_CONFIRM, true)
+            putBoolean(KEY_HANDS_FREE, settings.handsFreeEnabled)
         }
     }
 
@@ -128,6 +132,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_HEURISTIC = "allow_heuristic_fallback"
         private const val KEY_TTS = "tts_enabled"
         private const val KEY_CONFIRM = "require_send_confirmation"
+        private const val KEY_HANDS_FREE = "hands_free_enabled"
 
         @Volatile
         private var instance: SettingsRepository? = null

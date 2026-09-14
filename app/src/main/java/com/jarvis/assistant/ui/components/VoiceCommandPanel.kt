@@ -302,7 +302,11 @@ private fun phaseLabel(state: JarvisUiState): String {
         JarvisPhase.THINKING -> "Thinking"
         JarvisPhase.EXECUTING, JarvisPhase.SENDING, JarvisPhase.VERIFYING -> "Working"
         JarvisPhase.COMPLETED -> "Completed"
-        JarvisPhase.CONFIRMATION -> "Waiting for confirmation"
+        JarvisPhase.CONFIRMATION -> if (state.isListening) {
+            "Say Send or Cancel"
+        } else {
+            "Waiting for confirmation"
+        }
         JarvisPhase.ERROR -> "Error"
         JarvisPhase.TRANSCRIBING -> "Transcribing"
         JarvisPhase.IDLE -> if (state.isListening) "Listening" else "Voice command"

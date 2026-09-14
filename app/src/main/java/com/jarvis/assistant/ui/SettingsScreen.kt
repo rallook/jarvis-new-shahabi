@@ -21,7 +21,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AccessibilityNew
+import androidx.compose.material.icons.rounded.Assistant
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Hearing
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
@@ -66,6 +68,8 @@ data class SettingsScreenState(
     val accessibilityEnabled: Boolean = false,
     val microphoneGranted: Boolean = false,
     val overlayGranted: Boolean = false,
+    val assistantRoleAvailable: Boolean = false,
+    val assistantRoleActive: Boolean = false,
     val savedMessage: String? = null
 )
 
@@ -81,9 +85,11 @@ fun SettingsScreen(
     onUpdateBackendUrl: (String) -> Unit,
     onToggleHeuristic: (Boolean) -> Unit,
     onToggleTts: (Boolean) -> Unit,
+    onToggleHandsFree: (Boolean) -> Unit,
     onRefreshStatus: () -> Unit,
     onRequestMicrophone: () -> Unit,
-    onRequestOverlayPermission: () -> Unit
+    onRequestOverlayPermission: () -> Unit,
+    onRequestAssistantRole: () -> Unit
 ) {
     val context = LocalContext.current
     var apiKeyDraft by remember { mutableStateOf("") }
@@ -213,6 +219,43 @@ fun SettingsScreen(
                     }
                 }
 
+                StatusRow(
+                    icon = Icons.Rounded.Hearing,
+                    title = "Hands-free assistant",
+                    subtitle = if (state.settings.handsFreeEnabled) {
+                        if (state.microphoneGranted) {
+                            "On — listening for “Jarvis” / “Hey Jarvis”"
+                        } else {
+                            "On — needs microphone permission"
+                        }
+                    } else {
+                        "Off — say “Jarvis” will not activate the microphone"
+                    },
+                    ok = !state.settings.handsFreeEnabled || state.microphoneGranted
+                )
+
+                if (state.assistantRoleAvailable) {
+                    StatusRow(
+                        icon = Icons.Rounded.Assistant,
+                        title = "Default assistant",
+                        subtitle = if (state.assistantRoleActive) {
+                            "Jarvis is the default assistant"
+                        } else {
+                            "Optional — set Jarvis as the system assistant"
+                        },
+                        ok = state.assistantRoleActive
+                    )
+                    if (!state.assistantRoleActive) {
+                        OutlinedButton(
+                            onClick = onRequestAssistantRole,
+                            shape = ButtonShape,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Set Jarvis as default assistant")
+                        }
+                    }
+                }
+
                 OutlinedButton(
                     onClick = onRefreshStatus,
                     shape = ButtonShape,
@@ -220,6 +263,25 @@ fun SettingsScreen(
                 ) {
                     Text("Refresh status")
                 }
+            }
+
+            SettingsSection(title = "Voice Assistant") {
+                SettingSwitchRow(
+                    icon = Icons.Rounded.Hearing,
+                    title = "Hands-free Jarvis",
+                    subtitle = if (state.settings.handsFreeEnabled) {
+                        "Listen for “Jarvis” to activate the microphone"
+                    } else {
+                        "Say “Jarvis” will not activate the microphone. The microphone button continues to work normally."
+                    },
+                    checked = state.settings.handsFreeEnabled,
+                    onCheckedChange = onToggleHandsFree
+                )
+                Text(
+                    text = "Manual microphone — always available",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             SettingsSection(title = "OpenAI") {

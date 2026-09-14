@@ -69,6 +69,24 @@
             android:foregroundServiceType="microphone" />
 
         <service
+            android:name=".assistant.JarvisVoiceInteractionService"
+            android:exported="true"
+            android:label="@string/voice_interaction_service_label"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/jarvis_voice_interaction_service" />
+        </service>
+
+        <service
+            android:name=".assistant.JarvisVoiceInteractionSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
+        <service
             android:name=".accessibility.JarvisAccessibilityService"
             android:exported="false"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
