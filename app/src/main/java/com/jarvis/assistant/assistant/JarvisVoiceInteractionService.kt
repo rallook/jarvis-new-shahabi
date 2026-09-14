@@ -4,22 +4,21 @@ import android.service.voice.VoiceInteractionService
 import android.util.Log
 
 /**
- * Lightweight system voice-interaction entry. Heavy UI / mic work is handled by
- * [JarvisVoiceInteractionSession] and the existing Jarvis pipeline — not here.
+ * Lightweight system voice-interaction entry. Heavy UI / mic / AI work is handled by
+ * [JarvisVoiceInteractionSession] and the existing Jarvis conversation pipeline.
  *
- * Note: Android does not give third-party apps Google's proprietary hotword DSP.
- * Continuous “Jarvis” detection is owned by [com.jarvis.assistant.wake.WakeWordEngine].
- * This service enables the official assistant role / assist-gesture path.
+ * Android does not give third-party apps Google's proprietary hotword DSP.
+ * This service enables the official assistant role / assist-gesture path only.
  */
 class JarvisVoiceInteractionService : VoiceInteractionService() {
 
     override fun onReady() {
         super.onReady()
-        Log.i(TAG, "VoiceInteractionService ready")
+        Log.i(TAG, "ASSISTANT_SERVICE_READY")
     }
 
     override fun onShutdown() {
-        Log.i(TAG, "VoiceInteractionService shutdown")
+        Log.i(TAG, "ASSISTANT_SERVICE_SHUTDOWN")
         super.onShutdown()
     }
 

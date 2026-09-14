@@ -1,30 +1,44 @@
 package com.jarvis.assistant.wake
 
 /**
- * Detects and strips “Jarvis” / “Hey Jarvis” wake phrases so only the real
- * command reaches the existing OpenAI / command pipeline.
+ * Wake-phrase helpers for stripping optional leading “Jarvis” from STT text,
+ * and detecting interrupt phrases like “Jarvis stop”.
  */
 object WakePhraseParser {
-
     private val wakePrefix = Regex(
-        pattern = """^\s*(?:hey\s+)?jarvis\b[\s,.:!\-]*""",
-        option = RegexOption.IGNORE_CASE
+        """^(?:hey\s+)?jarvis[\s,]+""",
+        RegexOption.IGNORE_CASE
     )
-
     private val wakeOnly = Regex(
-        pattern = """^\s*(?:hey\s+)?jarvis\b[\s,.:!\-]*$""",
-        option = RegexOption.IGNORE_CASE
+        """^(?:hey\s+)?jarvis[.!?]*$""",
+        RegexOption.IGNORE_CASE
+    )
+    private val stopCommand = Regex(
+        """^(?:hey\s+)?jarvis[\s,]+stop(?:\s+please)?[.!]?$|^stop(?:\s+please)?[.!]?$|^jarvis[\s,]+stop(?:\s+.+)?$""",
+        RegexOption.IGNORE_CASE
     )
 
     fun containsWakePhrase(text: String): Boolean {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return false
         return wakePrefix.containsMatchIn(trimmed) ||
-            trimmed.contains("jarvis", ignoreCase = true)
+            wakeOnly.matches(trimmed)
     }
 
     /** True when the utterance is only the wake phrase (no command). */
     fun isWakeOnly(text: String): Boolean = wakeOnly.matches(text.trim())
+
+    /** True for interrupt phrases such as “Jarvis stop” / “stop”. */
+    fun isStopCommand(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return false
+        if (stopCommand.matches(trimmed)) return true
+        val lower = trimmed.lowercase()
+        return lower == "stop" ||
+            lower == "jarvis stop" ||
+            lower == "hey jarvis stop" ||
+            lower.startsWith("jarvis stop") ||
+            lower == "stop jarvis"
+    }
 
     /**
      * Removes a leading wake phrase. Returns blank when the utterance was
@@ -32,37 +46,21 @@ object WakePhraseParser {
      */
     fun stripWakePhrase(text: String): String {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return ""
+        if (trimmed.isBlank()) return ""
         if (isWakeOnly(trimmed)) return ""
-        val stripped = wakePrefix.replaceFirst(trimmed, "").trim()
-        // If wake word appears mid-sentence without a clean prefix, leave text as-is
-        // unless it still starts with jarvis after soft cleanup.
-        return stripped.ifBlank {
-            if (containsWakePhrase(trimmed) && !trimmed.contains(',')) {
-                trimmed.replace(Regex("""(?i)\b(?:hey\s+)?jarvis\b[\s,.:!\-]*"""), "")
-                    .trim()
-            } else {
-                trimmed
-            }
-        }
+        return wakePrefix.replaceFirst(trimmed, "").trim()
     }
 
     /**
-     * For wake-engine results: if the transcript starts with the wake phrase,
-     * return the remainder (may be blank). Null if this is not a wake event.
+     * If the transcript starts with the wake phrase, return the remainder
+     * (may be blank). Null if this is not a wake-prefixed utterance.
      */
     fun extractAfterWake(text: String): String? {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return null
+        if (trimmed.isBlank()) return null
+        if (isWakeOnly(trimmed)) return ""
         if (!wakePrefix.containsMatchIn(trimmed)) {
-            // Also accept "… Jarvis …" only when jarvis is near the start
-            val lower = trimmed.lowercase()
-            val idx = lower.indexOf("jarvis")
-            if (idx < 0 || idx > 12) return null
-            if (idx > 0) {
-                val before = lower.substring(0, idx).trim()
-                if (before.isNotEmpty() && before != "hey") return null
-            }
+            return null
         }
         return stripWakePhrase(trimmed)
     }

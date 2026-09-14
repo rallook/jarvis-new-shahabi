@@ -9,7 +9,7 @@ class JarvisApplication : Application() {
         super.onCreate()
         // Warm the overlay controller so lifecycle cleanup stays consistent.
         JarvisOverlayController.getInstance(this)
-        // Initialize hands-free wake layer (respects Settings default ON).
+        // Bridge for system assistant invocations (no continuous wake STT).
         JarvisHandsFreeController.getInstance(this).initialize()
     }
 

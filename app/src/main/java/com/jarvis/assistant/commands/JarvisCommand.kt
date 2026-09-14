@@ -17,6 +17,7 @@ enum class ActionType {
     SET_TIMER,
     SET_ALARM,
     GOOGLE_SEARCH,
+    CLOSE_JARVIS,
     CLICK,
     LONG_CLICK,
     TYPE,
@@ -102,6 +103,12 @@ sealed class JarvisCommand {
     }
 
     @Serializable
+    @SerialName("CLOSE_JARVIS")
+    data object CloseJarvis : JarvisCommand() {
+        override val action: ActionType = ActionType.CLOSE_JARVIS
+    }
+
+    @Serializable
     @SerialName("UNSUPPORTED")
     data class Unsupported(
         val reason: String,
@@ -113,7 +120,32 @@ sealed class JarvisCommand {
 
 @Serializable
 data class BrainResponse(
-    val action: String,
+    /** CHAT | SYSTEM_QUERY | ACTION | SINGLE_ACTION | MULTI_STEP_ACTION | CHAT_WITH_ACTION — optional for legacy */
+    val type: String? = null,
+    val response: String? = null,
+    val action: String? = null,
+    val id: String? = null,
+    val contact: String? = null,
+    val message: String? = null,
+    val appName: String? = null,
+    val packageName: String? = null,
+    val songName: String? = null,
+    val song: String? = null,
+    val artist: String? = null,
+    val query: String? = null,
+    val searchContent: String? = null,
+    val durationSeconds: Int? = null,
+    val hour: Int? = null,
+    val minute: Int? = null,
+    val reason: String? = null,
+    val systemQuery: String? = null,
+    val steps: List<BrainStepResponse>? = null
+)
+
+@Serializable
+data class BrainStepResponse(
+    val id: String? = null,
+    val action: String? = null,
     val contact: String? = null,
     val message: String? = null,
     val appName: String? = null,

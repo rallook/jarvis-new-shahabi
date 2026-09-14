@@ -89,7 +89,9 @@ fun VoiceCommandPanel(
         JarvisPhase.IDLE,
         JarvisPhase.COMPLETED,
         JarvisPhase.ERROR,
-        JarvisPhase.CONFIRMATION
+        JarvisPhase.CONFIRMATION,
+        JarvisPhase.WAITING_FOR_USER,
+        JarvisPhase.ENDING
     ) && !state.isListening
 
     val density = LocalDensity.current
@@ -300,7 +302,10 @@ private fun phaseLabel(state: JarvisUiState): String {
     return when (state.phase) {
         JarvisPhase.LISTENING -> "Listening"
         JarvisPhase.THINKING -> "Thinking"
-        JarvisPhase.EXECUTING, JarvisPhase.SENDING, JarvisPhase.VERIFYING -> "Working"
+        JarvisPhase.EXECUTING, JarvisPhase.SENDING, JarvisPhase.VERIFYING -> "Performing action"
+        JarvisPhase.SPEAKING -> "Speaking"
+        JarvisPhase.WAITING_FOR_USER -> "Waiting for you"
+        JarvisPhase.ENDING -> "Ending"
         JarvisPhase.COMPLETED -> "Completed"
         JarvisPhase.CONFIRMATION -> if (state.isListening) {
             "Say Send or Cancel"
@@ -309,7 +314,7 @@ private fun phaseLabel(state: JarvisUiState): String {
         }
         JarvisPhase.ERROR -> "Error"
         JarvisPhase.TRANSCRIBING -> "Transcribing"
-        JarvisPhase.IDLE -> if (state.isListening) "Listening" else "Voice command"
+        JarvisPhase.IDLE -> if (state.isListening) "Listening" else "Ready"
     }
 }
 
@@ -338,11 +343,20 @@ private fun PanelBody(
     ) {
         val transcription = state.liveTranscription.ifBlank { state.finalTranscription }
         when (state.phase) {
-            JarvisPhase.IDLE, JarvisPhase.LISTENING, JarvisPhase.TRANSCRIBING -> {
+            JarvisPhase.IDLE,
+            JarvisPhase.LISTENING,
+            JarvisPhase.TRANSCRIBING,
+            JarvisPhase.WAITING_FOR_USER -> {
                 Text(
-                    text = transcription.ifBlank { "Tap the microphone and speak" },
+                    text = transcription.ifBlank {
+                        if (state.phase == JarvisPhase.WAITING_FOR_USER) {
+                            state.assistantMessage.ifBlank { "I'm listening…" }
+                        } else {
+                            "Tap the microphone and speak"
+                        }
+                    },
                     style = MaterialTheme.typography.bodyLarge,
-                    color = if (transcription.isBlank()) {
+                    color = if (transcription.isBlank() && state.phase != JarvisPhase.WAITING_FOR_USER) {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     } else {
                         MaterialTheme.colorScheme.onSurface
@@ -353,7 +367,9 @@ private fun PanelBody(
             JarvisPhase.THINKING,
             JarvisPhase.EXECUTING,
             JarvisPhase.SENDING,
-            JarvisPhase.VERIFYING -> {
+            JarvisPhase.VERIFYING,
+            JarvisPhase.SPEAKING,
+            JarvisPhase.ENDING -> {
                 if (transcription.isNotBlank()) {
                     Text(
                         text = transcription,
@@ -362,7 +378,13 @@ private fun PanelBody(
                     )
                 }
                 Text(
-                    text = state.assistantMessage.ifBlank { "Working…" },
+                    text = state.assistantMessage.ifBlank {
+                        when (state.phase) {
+                            JarvisPhase.SPEAKING -> "Speaking…"
+                            JarvisPhase.ENDING -> "Ending…"
+                            else -> "Working…"
+                        }
+                    },
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.Medium

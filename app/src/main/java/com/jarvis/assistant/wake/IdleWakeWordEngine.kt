@@ -12,147 +12,104 @@ import android.util.Log
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class WakeEvent(
-    /** Original STT transcript. */
-    val rawTranscript: String,
-    /** Command text after stripping the wake phrase; blank when wake-only. */
-    val commandAfterWake: String
-)
-
 /**
- * Isolates wake-phrase detection so Jarvis does not depend on a particular
- * hotword vendor. Android does not expose Google's proprietary “Hey Google”
- * engine to third-party apps; this implementation uses on-device
- * [SpeechRecognizer] in a restart loop while the mic FGS is held.
+ * Idle-only wake listener: runs only when Jarvis is not in an active conversation.
+ * Detects “Jarvis” / “Hey Jarvis” to re-open the mic after silence ends the session.
+ *
+ * This is not a proprietary hotword DSP — it uses SpeechRecognizer in short bursts
+ * while idle, and must be suspended during conversation / TTS.
  */
-interface WakeWordEngine {
-    fun start(onWake: (WakeEvent) -> Unit)
-    fun stop()
-    fun suspend()
-    fun resume()
-    fun isRunning(): Boolean
-    fun destroy()
-}
+class IdleWakeWordEngine(context: Context) {
 
-class SpeechRecognizerWakeWordEngine(
-    context: Context
-) : WakeWordEngine {
+    data class WakeEvent(
+        val rawTranscript: String,
+        val commandAfterWake: String
+    )
 
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private val desiredRunning = AtomicBoolean(false)
     private val suspended = AtomicBoolean(false)
-    private val listening = AtomicBoolean(false)
-
     private var speechRecognizer: SpeechRecognizer? = null
     private var onWake: ((WakeEvent) -> Unit)? = null
     private var restartRunnable: Runnable? = null
 
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {
-            listening.set(true)
-        }
-
+        override fun onReadyForSpeech(params: Bundle?) = Unit
         override fun onBeginningOfSpeech() = Unit
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
-
-        override fun onEndOfSpeech() {
-            listening.set(false)
-        }
+        override fun onEndOfSpeech() = Unit
+        override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
         override fun onError(error: Int) {
-            listening.set(false)
-            // Expected during continuous wake listening — restart quietly.
-            if (error != SpeechRecognizer.ERROR_CLIENT) {
-                Log.d(TAG, "wake recognizer error=$error")
-            }
             scheduleRestart(delayMs = restartDelayFor(error))
         }
 
         override fun onResults(results: Bundle?) {
-            listening.set(false)
-            val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            val best = texts?.firstOrNull().orEmpty().trim()
+            val best = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull().orEmpty().trim()
             if (best.isNotBlank()) {
                 val after = WakePhraseParser.extractAfterWake(best)
                 if (after != null) {
                     Log.i(TAG, "JARVIS_WAKE_DETECTED")
                     val callback = onWake
-                    // Stop before handing off so command STT can own the mic.
                     stopInternal(keepDesired = false)
-                    callback?.invoke(
-                        WakeEvent(
-                            rawTranscript = best,
-                            commandAfterWake = after
-                        )
-                    )
+                    callback?.invoke(WakeEvent(rawTranscript = best, commandAfterWake = after))
                     return
                 }
             }
-            scheduleRestart(delayMs = 280L)
+            scheduleRestart(delayMs = 350L)
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            val texts = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            val partial = texts?.firstOrNull().orEmpty()
+            val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull().orEmpty()
             if (partial.isBlank()) return
-            // Fast-path: clear wake-only partials can activate early.
             val after = WakePhraseParser.extractAfterWake(partial)
             if (after != null && WakePhraseParser.isWakeOnly(partial)) {
                 Log.i(TAG, "JARVIS_WAKE_DETECTED")
                 val callback = onWake
                 stopInternal(keepDesired = false)
-                callback?.invoke(
-                    WakeEvent(rawTranscript = partial, commandAfterWake = "")
-                )
+                callback?.invoke(WakeEvent(rawTranscript = partial, commandAfterWake = ""))
             }
         }
-
-        override fun onEvent(eventType: Int, params: Bundle?) = Unit
     }
 
-    override fun start(onWake: (WakeEvent) -> Unit) {
+    fun start(onWake: (WakeEvent) -> Unit) {
         this.onWake = onWake
         desiredRunning.set(true)
         suspended.set(false)
-        Log.i(TAG, "JARVIS_WAKE_ENABLED")
         mainHandler.post { beginListening() }
     }
 
-    override fun stop() {
+    fun stop() {
         desiredRunning.set(false)
         stopInternal(keepDesired = false)
-        Log.i(TAG, "JARVIS_WAKE_DISABLED")
     }
 
-    override fun suspend() {
+    fun suspend() {
         if (!desiredRunning.get()) return
         suspended.set(true)
-        Log.i(TAG, "JARVIS_WAKE_SUSPENDED_TTS")
         stopInternal(keepDesired = true)
     }
 
-    override fun resume() {
+    fun resume() {
         if (!desiredRunning.get()) return
         suspended.set(false)
-        Log.i(TAG, "JARVIS_WAKE_RESUMED")
         mainHandler.post { beginListening() }
     }
 
-    override fun isRunning(): Boolean = desiredRunning.get() && !suspended.get()
+    fun isRunning(): Boolean = desiredRunning.get() && !suspended.get()
 
-    override fun destroy() {
+    fun destroy() {
         stop()
         onWake = null
     }
 
     private fun beginListening() {
         if (!desiredRunning.get() || suspended.get()) return
-        if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
-            Log.e(TAG, "JARVIS_WAKE_ERROR recognition unavailable")
-            return
-        }
+        if (!SpeechRecognizer.isRecognitionAvailable(appContext)) return
         cancelRestart()
         destroyRecognizer()
         try {
@@ -169,7 +126,6 @@ class SpeechRecognizerWakeWordEngine(
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, appContext.packageName)
-                // Prefer shorter utterances for wake detection.
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 900L)
                 putExtra(
                     RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
@@ -177,29 +133,23 @@ class SpeechRecognizerWakeWordEngine(
                 )
             }
             recognizer.startListening(intent)
-            listening.set(true)
         } catch (t: Throwable) {
-            Log.e(TAG, "JARVIS_WAKE_ERROR", t)
-            listening.set(false)
+            Log.e(TAG, "wake listen failed", t)
             scheduleRestart(delayMs = 1200L)
         }
     }
 
     private fun stopInternal(keepDesired: Boolean) {
-        if (!keepDesired) {
-            desiredRunning.set(false)
-        }
+        if (!keepDesired) desiredRunning.set(false)
         cancelRestart()
         destroyRecognizer()
-        listening.set(false)
     }
 
     private fun destroyRecognizer() {
         try {
             speechRecognizer?.cancel()
             speechRecognizer?.destroy()
-        } catch (t: Throwable) {
-            Log.w(TAG, "destroyRecognizer", t)
+        } catch (_: Throwable) {
         } finally {
             speechRecognizer = null
         }
@@ -218,18 +168,16 @@ class SpeechRecognizerWakeWordEngine(
         restartRunnable = null
     }
 
-    private fun restartDelayFor(error: Int): Long {
-        return when (error) {
-            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 800L
-            SpeechRecognizer.ERROR_CLIENT -> 500L
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> 5000L
-            SpeechRecognizer.ERROR_NETWORK,
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> 1500L
-            else -> 350L
-        }
+    private fun restartDelayFor(error: Int): Long = when (error) {
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 800L
+        SpeechRecognizer.ERROR_CLIENT -> 500L
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> 5000L
+        SpeechRecognizer.ERROR_NETWORK,
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> 1500L
+        else -> 400L
     }
 
     companion object {
-        private const val TAG = "JarvisWake"
+        private const val TAG = "JarvisIdleWake"
     }
 }

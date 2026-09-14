@@ -10,6 +10,9 @@ enum class JarvisPhase {
     TRANSCRIBING,
     THINKING,
     EXECUTING,
+    SPEAKING,
+    WAITING_FOR_USER,
+    ENDING,
     CONFIRMATION,
     SENDING,
     VERIFYING,
@@ -44,5 +47,7 @@ data class JarvisUiState(
     val needsMicrophone: Boolean = false,
     val needsAccessibility: Boolean = false,
     val needsOverlayPermission: Boolean = false,
-    val setupComplete: Boolean = false
+    val setupComplete: Boolean = false,
+    /** True while a multi-turn conversation session is active. */
+    val conversationActive: Boolean = false
 )

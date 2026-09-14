@@ -221,15 +221,15 @@ fun SettingsScreen(
 
                 StatusRow(
                     icon = Icons.Rounded.Hearing,
-                    title = "Hands-free assistant",
+                    title = "Assistant invocations",
                     subtitle = if (state.settings.handsFreeEnabled) {
                         if (state.microphoneGranted) {
-                            "On — listening for “Jarvis” / “Hey Jarvis”"
+                            "On — system assist gesture / default assistant can open Jarvis"
                         } else {
                             "On — needs microphone permission"
                         }
                     } else {
-                        "Off — say “Jarvis” will not activate the microphone"
+                        "Off — only the microphone button starts Jarvis"
                     },
                     ok = !state.settings.handsFreeEnabled || state.microphoneGranted
                 )
@@ -268,17 +268,17 @@ fun SettingsScreen(
             SettingsSection(title = "Voice Assistant") {
                 SettingSwitchRow(
                     icon = Icons.Rounded.Hearing,
-                    title = "Hands-free Jarvis",
+                    title = "Use Jarvis as your Android voice assistant",
                     subtitle = if (state.settings.handsFreeEnabled) {
-                        "Listen for “Jarvis” to activate the microphone"
+                        "Allow system assistant / assist-gesture invocations to start Jarvis. Does not add a custom “Hey Jarvis” hotword."
                     } else {
-                        "Say “Jarvis” will not activate the microphone. The microphone button continues to work normally."
+                        "System assistant invocations are off. The microphone button continues to work normally."
                     },
                     checked = state.settings.handsFreeEnabled,
                     onCheckedChange = onToggleHandsFree
                 )
                 Text(
-                    text = "Manual microphone — always available",
+                    text = "Manual microphone — always available. Set Jarvis as default assistant above when you want the system assist gesture.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

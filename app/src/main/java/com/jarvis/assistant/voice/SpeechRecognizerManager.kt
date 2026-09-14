@@ -28,9 +28,16 @@ data class SpeechRecognitionState(
  */
 interface SpeechRecognizerManager {
     val state: StateFlow<SpeechRecognitionState>
+    /** Optional activity hooks for conversation silence tracking. */
+    var activityListener: ActivityListener?
     fun startListening()
     fun stopListening()
     fun destroy()
+
+    interface ActivityListener {
+        fun onSpeechBeginning()
+        fun onSpeechEnding()
+    }
 }
 
 class AndroidSpeechRecognizerManager(
@@ -41,14 +48,20 @@ class AndroidSpeechRecognizerManager(
     private val _state = MutableStateFlow(SpeechRecognitionState())
     override val state: StateFlow<SpeechRecognitionState> = _state.asStateFlow()
 
+    @Volatile
+    override var activityListener: SpeechRecognizerManager.ActivityListener? = null
+
     private var speechRecognizer: SpeechRecognizer? = null
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
+            Log.i(TAG, "STT_STARTED")
             _state.update { it.copy(isListening = true, error = null) }
         }
 
-        override fun onBeginningOfSpeech() = Unit
+        override fun onBeginningOfSpeech() {
+            activityListener?.onSpeechBeginning()
+        }
 
         override fun onRmsChanged(rmsdB: Float) {
             val normalized = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
@@ -58,6 +71,7 @@ class AndroidSpeechRecognizerManager(
         override fun onBufferReceived(buffer: ByteArray?) = Unit
 
         override fun onEndOfSpeech() {
+            activityListener?.onSpeechEnding()
             _state.update { it.copy(isListening = false) }
         }
 
@@ -75,6 +89,7 @@ class AndroidSpeechRecognizerManager(
                 else -> "Speech recognition error ($error)"
             }
             Log.w(TAG, message)
+            activityListener?.onSpeechEnding()
             _state.update {
                 it.copy(isListening = false, error = message, rmsLevel = 0f)
             }
@@ -83,6 +98,7 @@ class AndroidSpeechRecognizerManager(
         override fun onResults(results: Bundle?) {
             val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             val best = texts?.firstOrNull().orEmpty()
+            Log.i(TAG, "STT_RESULT")
             _state.update {
                 it.copy(
                     isListening = false,
@@ -98,6 +114,7 @@ class AndroidSpeechRecognizerManager(
             val texts = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             val partial = texts?.firstOrNull().orEmpty()
             if (partial.isNotBlank()) {
+                activityListener?.onSpeechBeginning()
                 _state.update { it.copy(liveTranscription = partial) }
             }
         }
@@ -153,6 +170,7 @@ class AndroidSpeechRecognizerManager(
     }
 
     override fun destroy() {
+        activityListener = null
         stopListening()
     }
 

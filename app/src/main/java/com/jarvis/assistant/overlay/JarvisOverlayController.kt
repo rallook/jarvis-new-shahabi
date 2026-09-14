@@ -25,7 +25,6 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-import com.jarvis.assistant.state.JarvisPhase
 import com.jarvis.assistant.state.JarvisUiState
 import com.jarvis.assistant.ui.components.VoiceCommandPanel
 import com.jarvis.assistant.ui.theme.JarvisTheme
@@ -40,12 +39,15 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
- * Floating Jarvis voice panel over other apps. Uses the same Material panel
- * design as the in-app UI. Dismissing the overlay never stops recognition,
- * AccessibilityService, or command pipelines — only removes the window.
+ * Floating Jarvis voice panel over other apps.
  *
- * The panel stays visible through COMPLETED / ERROR until the user dismisses
- * it (X or swipe-down). Task completion must never auto-remove the window.
+ * Visibility is intentionally SEPARATE from mic / TTS / task / conversation state.
+ * Once shown ([ensureFloatingUiVisible]), the panel stays until an explicit dismissal:
+ * X button, swipe-down, or CLOSE_JARVIS — never because silence, TTS, or tasks end.
+ *
+ * While the host Activity is in the foreground the window is temporarily hidden so
+ * the in-app panel is not duplicated; [jarvisFloatingUiVisible] remains true and the
+ * overlay returns as soon as the host leaves the foreground.
  */
 class JarvisOverlayController private constructor(
     private val appContext: Context
@@ -70,7 +72,12 @@ class JarvisOverlayController private constructor(
     private val _overlayVisible = MutableStateFlow(false)
     val overlayVisible: StateFlow<Boolean> = _overlayVisible.asStateFlow()
 
-    private val _userDismissed = MutableStateFlow(false)
+    /**
+     * Persistent user-facing visibility intent.
+     * True after Jarvis is intentionally shown; false only after explicit dismiss.
+     */
+    private val _jarvisFloatingUiVisible = MutableStateFlow(false)
+    val jarvisFloatingUiVisible: StateFlow<Boolean> = _jarvisFloatingUiVisible.asStateFlow()
 
     var hostCallbacks: HostCallbacks? = null
 
@@ -82,27 +89,33 @@ class JarvisOverlayController private constructor(
 
     fun publishState(state: JarvisUiState) {
         _uiState.value = state
-        // Re-arm overlay after returning to idle so the next session can show it.
-        if (state.phase == JarvisPhase.IDLE && !state.isListening) {
-            _userDismissed.value = false
+        // Never toggle visibility from phase / listening / conversation flags.
+        reconcile()
+    }
+
+    /** Mark Jarvis as shown and keep it until explicit dismiss. */
+    fun ensureFloatingUiVisible() {
+        if (!_jarvisFloatingUiVisible.value) {
+            Log.i(TAG, "jarvisFloatingUiVisible=true")
         }
+        _jarvisFloatingUiVisible.value = true
         reconcile()
     }
 
     fun setHostInForeground(inForeground: Boolean) {
         _hostInForeground.value = inForeground
-        if (inForeground) {
-            // Avoid duplicate panels while the main activity is visible.
-            hideOverlayWindow()
-        } else {
-            reconcile()
-        }
+        reconcile()
     }
 
+    /**
+     * Explicit dismissal only (X / swipe / CLOSE_JARVIS).
+     */
     fun dismissOverlay() {
-        _userDismissed.value = true
+        Log.i(TAG, "jarvisFloatingUiVisible=false (explicit dismiss)")
+        _jarvisFloatingUiVisible.value = false
         draggingPanel = false
         hideOverlayWindow()
+        reconcile()
     }
 
     fun canDrawOverlays(): Boolean {
@@ -119,16 +132,17 @@ class JarvisOverlayController private constructor(
     fun start() {
         if (collectJob != null) return
         collectJob = scope.launch {
-            combine(_uiState, _hostInForeground, _userDismissed) { state, hostFg, dismissed ->
-                Triple(state, hostFg, dismissed)
-            }.collect { (state, hostFg, dismissed) ->
+            combine(_hostInForeground, _jarvisFloatingUiVisible) { hostFg, floatingDesired ->
+                hostFg to floatingDesired
+            }.collect { (hostFg, floatingDesired) ->
                 val shouldShow = !hostFg &&
-                    !dismissed &&
-                    canDrawOverlays() &&
-                    shouldShowForPhase(state)
+                    floatingDesired &&
+                    canDrawOverlays()
                 if (shouldShow) {
                     showOverlayWindow()
-                } else if (hostFg || dismissed || !shouldShowForPhase(state)) {
+                } else {
+                    // Hide window while host is foreground or user dismissed —
+                    // never because of task/mic/silence state.
                     hideOverlayWindow()
                 }
             }
@@ -143,14 +157,8 @@ class JarvisOverlayController private constructor(
     }
 
     private fun reconcile() {
-        // Trigger combine collector via republishing current flags.
         _hostInForeground.value = _hostInForeground.value
-    }
-
-    private fun shouldShowForPhase(state: JarvisUiState): Boolean {
-        // Keep panel for listening and any non-idle phase including COMPLETED / ERROR.
-        // Idle alone (and not listening) hides — only after user dismiss resets to idle.
-        return state.isListening || state.phase != JarvisPhase.IDLE
+        _jarvisFloatingUiVisible.value = _jarvisFloatingUiVisible.value
     }
 
     private fun showOverlayWindow() {
@@ -177,13 +185,14 @@ class JarvisOverlayController private constructor(
                             onSubmitTextCommand = { hostCallbacks?.onSubmitTextCommand(it) },
                             micEnabled = !state.needsMicrophone &&
                                 state.phase !in setOf(
-                                    JarvisPhase.THINKING,
-                                    JarvisPhase.SENDING,
-                                    JarvisPhase.VERIFYING
+                                    com.jarvis.assistant.state.JarvisPhase.THINKING,
+                                    com.jarvis.assistant.state.JarvisPhase.SENDING,
+                                    com.jarvis.assistant.state.JarvisPhase.VERIFYING,
+                                    com.jarvis.assistant.state.JarvisPhase.ENDING
                                 ),
                             showDismissControls = true,
                             onDismiss = {
-                                // User X / swipe only — never auto-dismiss on task completion.
+                                // User X / swipe only.
                                 hostCallbacks?.onDismissPanel() ?: dismissOverlay()
                             },
                             onDismissDragActive = { active -> setPanelDragging(active) },
@@ -205,8 +214,6 @@ class JarvisOverlayController private constructor(
                     @Suppress("DEPRECATION")
                     WindowManager.LayoutParams.TYPE_PHONE
                 },
-                // NOT_FOCUSABLE keeps YouTube/WhatsApp audio & focus; NOT_TOUCH_MODAL
-                // lets touches outside the panel reach the underlying app.
                 baseOverlayFlags(),
                 PixelFormat.TRANSLUCENT
             ).apply {
@@ -233,8 +240,6 @@ class JarvisOverlayController private constructor(
         draggingPanel = active
         val view = composeView ?: return
         val params = layoutParams ?: return
-        // While dragging, drop NOT_TOUCH_MODAL so the swipe isn't delivered
-        // to the underlying app if the finger drifts outside the panel.
         params.flags = if (active) {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or

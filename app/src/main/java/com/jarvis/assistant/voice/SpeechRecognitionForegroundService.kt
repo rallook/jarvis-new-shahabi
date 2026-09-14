@@ -13,9 +13,8 @@ import com.jarvis.assistant.R
 
 /**
  * Foreground microphone service required on newer Android versions when
- * capturing audio while the app may briefly lose focus during WhatsApp handoff,
- * or while hands-free wake listening is active.
- * Recognition itself remains in [SpeechRecognizerManager] / [com.jarvis.assistant.wake.WakeWordEngine].
+ * capturing audio while the app may briefly lose focus (e.g. WhatsApp handoff).
+ * Recognition itself remains in [SpeechRecognizerManager].
  */
 class SpeechRecognitionForegroundService : Service() {
 
@@ -39,7 +38,7 @@ class SpeechRecognitionForegroundService : Service() {
     private fun startAsForeground(mode: String) {
         ensureChannel()
         val text = if (mode == MODE_WAKE) {
-            getString(R.string.wake_service_notification)
+            "Say “Jarvis” to talk"
         } else {
             getString(R.string.speech_service_notification)
         }

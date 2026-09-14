@@ -11,34 +11,35 @@ import com.jarvis.assistant.overlay.JarvisOverlayController
 import com.jarvis.assistant.settings.SettingsRepository
 import com.jarvis.assistant.state.JarvisPhase
 import com.jarvis.assistant.voice.MicForegroundGate
-import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Hands-free activation layer only.
+ * Bridges Android assistant invocations + idle “Jarvis” wake into the conversation pipeline.
  *
- * wake detected → existing microphone ON → existing command pipeline → mic OFF
- *
- * Does not contain WhatsApp / YouTube / Spotify / Google / Timer / Alarm logic.
+ * Idle wake runs only when no conversation is active. It is suspended during TTS / listening.
  */
 class JarvisHandsFreeController private constructor(
     private val appContext: Context
 ) {
     interface Host {
-        /** Enter the existing mic / STT listening path (same as tapping the mic). */
-        fun activateMicrophone()
+        /**
+         * Enter listening. [acknowledge] speaks a short “Yes, sir” first.
+         * [commandAfterAck] is processed after the acknowledgment finishes.
+         */
+        fun activateMicrophone(acknowledge: Boolean = false, commandAfterAck: String = "")
 
-        /** Feed a command that arrived in the same utterance as the wake phrase. */
         fun submitCommand(text: String)
 
         fun isListening(): Boolean
 
         fun currentPhase(): JarvisPhase
+
+        fun isConversationActive(): Boolean
     }
 
     private val settings = SettingsRepository.getInstance(appContext)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val state = AtomicReference(HandsFreeState.DISABLED)
-    private val wakeEngine: WakeWordEngine = SpeechRecognizerWakeWordEngine(appContext)
+    private val state = java.util.concurrent.atomic.AtomicReference(HandsFreeState.DISABLED)
+    private val wakeEngine = IdleWakeWordEngine(appContext)
 
     @Volatile
     private var host: Host? = null
@@ -52,14 +53,14 @@ class JarvisHandsFreeController private constructor(
     fun initialize() {
         if (initialized) return
         initialized = true
-        Log.i(TAG, "JARVIS_WAKE_INITIALIZING")
+        Log.i(TAG, "ASSISTANT_SERVICE_READY (hands-free bridge)")
         applyEnabledFromSettings(settings.get().handsFreeEnabled)
     }
 
     fun bindHost(host: Host?) {
         this.host = host
         if (host != null && settings.get().handsFreeEnabled) {
-            ensureWakeRunningIfIdle()
+            ensureIdleWakeIfNeeded()
         }
     }
 
@@ -72,26 +73,25 @@ class JarvisHandsFreeController private constructor(
 
     fun currentState(): HandsFreeState = state.get()
 
-    /**
-     * System assistant / VoiceInteractionSession assist trigger — same path as wake word.
-     */
     fun onAssistantInvoked() {
-        if (!settings.get().handsFreeEnabled) return
-        Log.i(TAG, "JARVIS_WAKE_DETECTED")
-        mainHandler.post {
-            handleWake(WakeEvent(rawTranscript = "Jarvis", commandAfterWake = ""))
+        if (!settings.get().handsFreeEnabled) {
+            Log.i(TAG, "ASSISTANT_INVOCATION ignored — hands-free off")
+            return
         }
+        Log.i(TAG, "ASSISTANT_INVOCATION")
+        mainHandler.post { handleActivation(commandAfterWake = "", acknowledge = true) }
     }
 
     fun onManualListeningStarted() {
         if (state.get() == HandsFreeState.DISABLED) return
         transition(HandsFreeState.LISTENING)
         wakeEngine.suspend()
+        MicForegroundGate.setWakeHolding(appContext, false)
     }
 
     fun onMicPermissionGranted() {
         if (settings.get().handsFreeEnabled) {
-            ensureWakeRunningIfIdle()
+            ensureIdleWakeIfNeeded()
         }
     }
 
@@ -99,7 +99,7 @@ class JarvisHandsFreeController private constructor(
         if (state.get() == HandsFreeState.DISABLED) return
 
         when (phase) {
-            JarvisPhase.LISTENING -> {
+            JarvisPhase.LISTENING, JarvisPhase.WAITING_FOR_USER -> {
                 if (isListening) {
                     transition(HandsFreeState.LISTENING)
                     wakeEngine.suspend()
@@ -109,7 +109,8 @@ class JarvisHandsFreeController private constructor(
             JarvisPhase.THINKING,
             JarvisPhase.EXECUTING,
             JarvisPhase.SENDING,
-            JarvisPhase.VERIFYING -> {
+            JarvisPhase.VERIFYING,
+            JarvisPhase.SPEAKING -> {
                 transition(HandsFreeState.PROCESSING)
                 wakeEngine.suspend()
             }
@@ -117,21 +118,17 @@ class JarvisHandsFreeController private constructor(
                 transition(HandsFreeState.PROCESSING)
                 wakeEngine.suspend()
             }
-            JarvisPhase.COMPLETED -> {
+            JarvisPhase.ENDING -> {
                 transition(HandsFreeState.COMMAND_COMPLETED)
-                Log.i(TAG, "JARVIS_COMMAND_COMPLETED")
-                Log.i(TAG, "JARVIS_HANDS_FREE_MIC_OFF")
-                scheduleReturnToIdle()
             }
-            JarvisPhase.ERROR -> {
-                transition(HandsFreeState.ERROR)
-                Log.i(TAG, "JARVIS_COMMAND_COMPLETED")
-                Log.i(TAG, "JARVIS_HANDS_FREE_MIC_OFF")
-                scheduleReturnToIdle()
+            JarvisPhase.COMPLETED, JarvisPhase.ERROR -> {
+                transition(HandsFreeState.COMMAND_COMPLETED)
+                scheduleIdleWake()
             }
             JarvisPhase.IDLE -> {
                 if (!isListening && !ttsActive) {
-                    scheduleReturnToIdle()
+                    transition(HandsFreeState.IDLE)
+                    scheduleIdleWake()
                 }
             }
         }
@@ -141,27 +138,22 @@ class JarvisHandsFreeController private constructor(
         ttsActive = true
         if (state.get() == HandsFreeState.DISABLED) return
         wakeEngine.suspend()
-        if (state.get() == HandsFreeState.IDLE || state.get() == HandsFreeState.COMMAND_COMPLETED) {
-            transition(HandsFreeState.TTS_ACTIVE)
-        }
+        transition(HandsFreeState.TTS_ACTIVE)
     }
 
     fun onTtsFinished() {
         ttsActive = false
         if (state.get() == HandsFreeState.DISABLED) return
-        val current = state.get()
-        if (current == HandsFreeState.TTS_ACTIVE ||
-            current == HandsFreeState.COMMAND_COMPLETED ||
-            current == HandsFreeState.ERROR ||
-            current == HandsFreeState.IDLE
-        ) {
-            scheduleReturnToIdle(delayMs = 350L)
+        if (state.get() == HandsFreeState.TTS_ACTIVE) {
+            transition(HandsFreeState.IDLE)
         }
+        scheduleIdleWake(delayMs = 400L)
     }
 
     fun onMicPermissionLost() {
         Log.e(TAG, "JARVIS_MIC_PERMISSION_MISSING")
-        stopWakeEngineAndFgs()
+        wakeEngine.stop()
+        MicForegroundGate.setWakeHolding(appContext, false)
         if (state.get() != HandsFreeState.DISABLED) {
             transition(HandsFreeState.ERROR)
         }
@@ -186,45 +178,55 @@ class JarvisHandsFreeController private constructor(
             wakeEngine.stop()
             MicForegroundGate.setWakeHolding(appContext, false)
             transition(HandsFreeState.DISABLED)
-            Log.i(TAG, "JARVIS_WAKE_DISABLED")
+            Log.i(TAG, "Hands-free assistant bridge disabled")
             return
         }
         transition(HandsFreeState.IDLE)
-        ensureWakeRunningIfIdle()
+        Log.i(TAG, "Hands-free assistant bridge enabled")
+        ensureIdleWakeIfNeeded()
     }
 
-    private fun ensureWakeRunningIfIdle() {
+    private fun scheduleIdleWake(delayMs: Long = 500L) {
+        mainHandler.removeCallbacks(idleWakeRunnable)
+        mainHandler.postDelayed(idleWakeRunnable, delayMs)
+    }
+
+    private val idleWakeRunnable = Runnable {
+        ensureIdleWakeIfNeeded()
+    }
+
+    private fun ensureIdleWakeIfNeeded() {
         if (!settings.get().handsFreeEnabled) return
-        if (!hasMicPermission()) {
-            Log.e(TAG, "JARVIS_MIC_PERMISSION_MISSING")
-            MicForegroundGate.setWakeHolding(appContext, false)
-            return
-        }
+        if (!hasMicPermission()) return
         if (ttsActive) return
-        val hostRef = host
-        if (hostRef?.isListening() == true) return
-        val phase = hostRef?.currentPhase()
-        if (phase != null && phase != JarvisPhase.IDLE &&
+        val h = host
+        if (h?.isListening() == true) return
+        if (h?.isConversationActive() == true) return
+        val phase = h?.currentPhase()
+        if (phase != null &&
+            phase != JarvisPhase.IDLE &&
             phase != JarvisPhase.COMPLETED &&
             phase != JarvisPhase.ERROR
         ) {
             return
         }
-        if (!JarvisOverlayController.getInstance(appContext).canDrawOverlays()) {
-            Log.w(TAG, "JARVIS_OVERLAY_PERMISSION_MISSING")
-        }
         transition(HandsFreeState.IDLE)
         MicForegroundGate.setWakeHolding(appContext, true)
         if (!wakeEngine.isRunning()) {
             wakeEngine.start { event ->
-                mainHandler.post { handleWake(event) }
+                mainHandler.post {
+                    handleActivation(
+                        commandAfterWake = event.commandAfterWake,
+                        acknowledge = true
+                    )
+                }
             }
         } else {
             wakeEngine.resume()
         }
     }
 
-    private fun handleWake(event: WakeEvent) {
+    private fun handleActivation(commandAfterWake: String, acknowledge: Boolean) {
         if (!settings.get().handsFreeEnabled) return
 
         val current = state.get()
@@ -233,84 +235,46 @@ class JarvisHandsFreeController private constructor(
             current == HandsFreeState.WAKE_DETECTED ||
             current == HandsFreeState.TTS_ACTIVE
         ) {
-            Log.d(TAG, "Ignoring wake while state=$current")
+            Log.d(TAG, "Ignoring activation while state=$current")
             return
         }
 
         val activeHost = host
         if (activeHost == null) {
-            Log.e(TAG, "JARVIS_WAKE_ERROR no host bound")
+            Log.e(TAG, "ASSISTANT_ERROR no host bound")
             transition(HandsFreeState.ERROR)
-            scheduleReturnToIdle(delayMs = 1500L)
+            scheduleIdleWake(delayMs = 1500L)
             return
         }
 
-        if (activeHost.isListening()) {
-            Log.d(TAG, "Ignoring wake — microphone already listening")
+        if (activeHost.isListening() || activeHost.isConversationActive()) {
+            Log.d(TAG, "Ignoring activation — conversation already active")
+            return
+        }
+
+        if (!hasMicPermission()) {
+            Log.e(TAG, "JARVIS_MIC_PERMISSION_MISSING")
+            transition(HandsFreeState.ERROR)
             return
         }
 
         transition(HandsFreeState.WAKE_DETECTED)
-        Log.i(TAG, "JARVIS_WAKE_ACTIVATING_MIC")
-
+        wakeEngine.suspend()
+        MicForegroundGate.setWakeHolding(appContext, false)
         JarvisOverlayController.getInstance(appContext).setHostInForeground(false)
 
-        val command = event.commandAfterWake.trim()
-        try {
-            if (command.isNotEmpty()) {
-                Log.i(TAG, "JARVIS_COMMAND_RECEIVED")
-                transition(HandsFreeState.PROCESSING)
-                wakeEngine.suspend()
-                MicForegroundGate.setWakeHolding(appContext, false)
-                activeHost.submitCommand(command)
-            } else {
+            try {
+                val command = commandAfterWake.trim()
                 transition(HandsFreeState.LISTENING)
-                Log.i(TAG, "JARVIS_HANDS_FREE_LISTENING")
-                wakeEngine.suspend()
-                MicForegroundGate.setWakeHolding(appContext, false)
-                activeHost.activateMicrophone()
+                activeHost.activateMicrophone(
+                    acknowledge = acknowledge,
+                    commandAfterAck = command
+                )
+            } catch (t: Throwable) {
+                Log.e(TAG, "ASSISTANT_ERROR", t)
+                transition(HandsFreeState.ERROR)
+                scheduleIdleWake(delayMs = 1200L)
             }
-        } catch (t: Throwable) {
-            Log.e(TAG, "JARVIS_WAKE_ERROR", t)
-            transition(HandsFreeState.ERROR)
-            scheduleReturnToIdle(delayMs = 1200L)
-        }
-    }
-
-    private fun scheduleReturnToIdle(delayMs: Long = 500L) {
-        mainHandler.removeCallbacks(returnToIdleRunnable)
-        mainHandler.postDelayed(returnToIdleRunnable, delayMs)
-    }
-
-    private val returnToIdleRunnable = Runnable {
-        if (!settings.get().handsFreeEnabled) {
-            transition(HandsFreeState.DISABLED)
-            stopWakeEngineAndFgs()
-            return@Runnable
-        }
-        if (ttsActive) {
-            transition(HandsFreeState.TTS_ACTIVE)
-            return@Runnable
-        }
-        val h = host
-        if (h?.isListening() == true) return@Runnable
-        val phase = h?.currentPhase()
-        if (phase == JarvisPhase.CONFIRMATION ||
-            phase == JarvisPhase.THINKING ||
-            phase == JarvisPhase.EXECUTING ||
-            phase == JarvisPhase.SENDING ||
-            phase == JarvisPhase.VERIFYING ||
-            phase == JarvisPhase.TRANSCRIBING ||
-            phase == JarvisPhase.LISTENING
-        ) {
-            return@Runnable
-        }
-        ensureWakeRunningIfIdle()
-    }
-
-    private fun stopWakeEngineAndFgs() {
-        wakeEngine.stop()
-        MicForegroundGate.setWakeHolding(appContext, false)
     }
 
     private fun transition(next: HandsFreeState) {

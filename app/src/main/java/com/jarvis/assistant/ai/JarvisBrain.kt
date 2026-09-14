@@ -1,11 +1,12 @@
 package com.jarvis.assistant.ai
 
+import android.util.Log
 import com.jarvis.assistant.commands.CommandParser
 import com.jarvis.assistant.commands.JarvisCommand
 import com.jarvis.assistant.settings.SettingsRepository
 
 /**
- * JarvisBrain understands natural language and returns structured actions only.
+ * JarvisBrain understands natural language and returns chat and/or structured actions.
  * It must never execute Android UI or Accessibility operations.
  */
 class JarvisBrain(
@@ -15,6 +16,24 @@ class JarvisBrain(
 ) : AiService {
 
     override suspend fun understandCommand(transcription: String): Result<JarvisCommand> {
+        return understandTurn(transcription).mapCatching { turn ->
+            when (turn) {
+                is AssistantTurnResult.Action -> turn.command
+                is AssistantTurnResult.ChatWithAction -> turn.command
+                is AssistantTurnResult.MultiStep -> turn.steps.firstOrNull()
+                    ?: JarvisCommand.Unsupported("Empty multi-step plan.")
+                is AssistantTurnResult.Chat -> JarvisCommand.Unsupported(turn.response)
+                is AssistantTurnResult.SystemQuery -> JarvisCommand.Unsupported(
+                    turn.spokenFallback ?: turn.queryId
+                )
+            }
+        }
+    }
+
+    override suspend fun understandTurn(
+        transcription: String,
+        history: List<ConversationMemoryTurn>
+    ): Result<AssistantTurnResult> {
         if (transcription.isBlank()) {
             return Result.failure(IllegalArgumentException("Empty transcription."))
         }
@@ -25,41 +44,57 @@ class JarvisBrain(
 
         if (!hasKey && !useBackend) {
             if (settings.allowHeuristicFallback) {
-                parseHeuristic(transcription)?.let { return Result.success(it) }
+                parseHeuristicTurn(transcription)?.let { return Result.success(it) }
             }
             return Result.failure(
                 IllegalStateException("Add an OpenAI API key in Settings, or enable heuristic fallback.")
             )
         }
 
-        val result = openAIClient.completeJson(SYSTEM_PROMPT, transcription)
-        return result.mapCatching { raw -> parser.parseBrainJson(raw) }
-            .recoverCatching { error ->
-                if (settings.allowHeuristicFallback) {
-                    parseHeuristic(transcription) ?: throw error
-                } else {
-                    throw error
-                }
+        Log.i(TAG, "AI_REQUEST")
+        val result = openAIClient.completeJson(SYSTEM_PROMPT, history, transcription)
+        return result.mapCatching { raw ->
+            Log.i(TAG, "AI_RESPONSE")
+            parser.parseAssistantTurn(raw)
+        }.recoverCatching { error ->
+            if (settings.allowHeuristicFallback) {
+                parseHeuristicTurn(transcription) ?: throw error
+            } else {
+                throw error
             }
+        }
     }
 
     /**
      * Offline fallback used when the API is unavailable.
      */
     fun parseHeuristic(transcription: String): JarvisCommand? {
+        return when (val turn = parseHeuristicTurn(transcription)) {
+            is AssistantTurnResult.Action -> turn.command
+            is AssistantTurnResult.ChatWithAction -> turn.command
+            is AssistantTurnResult.MultiStep -> turn.steps.firstOrNull()
+            is AssistantTurnResult.SystemQuery -> null
+            is AssistantTurnResult.Chat -> null
+            null -> null
+        }
+    }
+
+    fun parseHeuristicTurn(transcription: String): AssistantTurnResult? {
         val text = transcription.trim().trimEnd('.', '!', '?')
         val lower = text.lowercase()
 
-        // Timer: "set a timer for 10 minutes"
-        parseTimer(text)?.let { return it }
+        if (looksLikeCloseJarvis(lower)) {
+            return AssistantTurnResult.Action(JarvisCommand.CloseJarvis)
+        }
 
-        // Alarm: "set an alarm for 7 AM"
-        parseAlarm(text)?.let { return it }
+        if (looksLikeBatteryQuery(lower)) {
+            return AssistantTurnResult.SystemQuery(queryId = "BATTERY")
+        }
 
-        // Google search (explicit google)
-        parseGoogleSearch(text, lower)?.let { return it }
+        parseTimer(text)?.let { return AssistantTurnResult.Action(it) }
+        parseAlarm(text)?.let { return AssistantTurnResult.Action(it) }
+        parseGoogleSearch(text, lower)?.let { return AssistantTurnResult.Action(it) }
 
-        // WhatsApp send
         val sendPatterns = listOf(
             Regex(
                 """(?:open\s+whatsapp\s+and\s+)?send\s+['"](.+?)['"]\s+to\s+([A-Za-z][\w\s.]*)$""",
@@ -76,17 +111,20 @@ class JarvisBrain(
             val message = match.groupValues[1].trim().trim('"', '\'')
             val contact = match.groupValues[2].trim().trim('.', ' ')
             if (message.isNotBlank() && contact.isNotBlank()) {
-                return JarvisCommand.SendWhatsAppMessage(contact = contact, message = message)
+                return AssistantTurnResult.Action(
+                    JarvisCommand.SendWhatsAppMessage(contact = contact, message = message)
+                )
             }
         }
 
-        // YouTube search (explicit)
         Regex(
             """open\s+youtube\s+and\s+search(?:\s+for)?\s+(.+)$""",
             RegexOption.IGNORE_CASE
         ).find(text)?.let { match ->
             val query = match.groupValues[1].trim().trim('"', '\'')
-            if (query.isNotBlank()) return JarvisCommand.YouTubeSearch(query = query)
+            if (query.isNotBlank()) {
+                return AssistantTurnResult.Action(JarvisCommand.YouTubeSearch(query = query))
+            }
         }
         Regex(
             """(?:youtube\s+)?search(?:\s+youtube)?(?:\s+for)?\s+(.+)$""",
@@ -94,11 +132,12 @@ class JarvisBrain(
         ).find(text)?.let { match ->
             if ("youtube" in lower) {
                 val query = match.groupValues[1].trim().trim('"', '\'')
-                if (query.isNotBlank()) return JarvisCommand.YouTubeSearch(query = query)
+                if (query.isNotBlank()) {
+                    return AssistantTurnResult.Action(JarvisCommand.YouTubeSearch(query = query))
+                }
             }
         }
 
-        // YouTube play — only when YouTube is named
         Regex(
             """(?:open\s+youtube\s+and\s+)?play\s+(.+)$""",
             RegexOption.IGNORE_CASE
@@ -110,7 +149,7 @@ class JarvisBrain(
                     .removeSuffix(" on youtube").removeSuffix(" on YouTube")
                     .trim()
                 if (song.isNotBlank() && "whatsapp" !in lower) {
-                    return JarvisCommand.YouTubePlay(songName = song)
+                    return AssistantTurnResult.Action(JarvisCommand.YouTubePlay(songName = song))
                 }
             }
         }
@@ -119,13 +158,13 @@ class JarvisBrain(
             RegexOption.IGNORE_CASE
         ).find(text)?.let { match ->
             val song = match.groupValues[1].trim().trim('"', '\'')
-            if (song.isNotBlank()) return JarvisCommand.YouTubePlay(songName = song)
+            if (song.isNotBlank()) {
+                return AssistantTurnResult.Action(JarvisCommand.YouTubePlay(songName = song))
+            }
         }
 
-        // Spotify play — explicit Spotify OR bare "play <song>"
-        parseSpotify(text, lower)?.let { return it }
+        parseSpotify(text, lower)?.let { return AssistantTurnResult.Action(it) }
 
-        // Open app (no play/search/send)
         if (lower.startsWith("open ") && !lower.contains("send") &&
             !lower.contains(" play ") && !lower.contains(" search")
         ) {
@@ -137,29 +176,62 @@ class JarvisBrain(
                     app.contains("youtube", ignoreCase = true) -> "com.google.android.youtube"
                     else -> null
                 }
-                return JarvisCommand.OpenApp(appName = app, packageName = pkg)
+                return AssistantTurnResult.Action(
+                    JarvisCommand.OpenApp(appName = app, packageName = pkg)
+                )
             }
+        }
+
+        if (looksLikeGeneralChat(lower)) {
+            return AssistantTurnResult.Chat(
+                "I need an OpenAI API key in Settings to answer general questions. " +
+                    "I can still run device commands like timers, WhatsApp, YouTube, and Spotify."
+            )
         }
 
         return null
     }
 
+    private fun looksLikeCloseJarvis(lower: String): Boolean {
+        val normalized = lower.trim().trimEnd('.', '!', '?')
+        return normalized in setOf(
+            "close jarvis",
+            "close the jarvis",
+            "dismiss jarvis",
+            "hide jarvis",
+            "close jarvis panel",
+            "dismiss the jarvis",
+            "hide the jarvis"
+        ) || Regex("""^(?:please\s+)?(?:close|dismiss|hide)\s+(?:the\s+)?jarvis(?:\s+panel)?$""")
+            .matches(normalized)
+    }
+
+    private fun looksLikeBatteryQuery(lower: String): Boolean {
+        return ("battery" in lower || "charge" in lower) &&
+            ("how" in lower || "what" in lower || "check" in lower || "percent" in lower || "%" in lower)
+    }
+
+    private fun looksLikeGeneralChat(lower: String): Boolean {
+        val starters = listOf(
+            "what is", "what's", "who is", "who's", "why ", "how do", "how does",
+            "explain", "tell me", "define ", "when was", "where is", "where was"
+        )
+        return starters.any { lower.startsWith(it) || " $it" in " $lower" }
+    }
+
     private fun parseSpotify(text: String, lower: String): JarvisCommand.PlaySpotifySong? {
-        // "Open/go to Spotify and play X"
         Regex(
             """(?:open|go\s+to)\s+spotify\s+and\s+play\s+(.+)$""",
             RegexOption.IGNORE_CASE
         ).find(text)?.let { match ->
             return spotifySongArtist(match.groupValues[1])
         }
-        // "Play X on Spotify"
         Regex(
             """play\s+(.+?)\s+on\s+spotify$""",
             RegexOption.IGNORE_CASE
         ).find(text)?.let { match ->
             return spotifySongArtist(match.groupValues[1])
         }
-        // Bare "Play X" (not youtube/whatsapp) → Spotify
         if (lower.startsWith("play ") && "youtube" !in lower && "whatsapp" !in lower) {
             val rest = text.removePrefix("Play ").removePrefix("play ").trim()
             if (rest.isNotBlank()) return spotifySongArtist(rest)
@@ -203,7 +275,6 @@ class JarvisBrain(
             val h = it.groupValues[1].toIntOrNull() ?: return null
             return h * 3600
         }
-        // "1 hour 30 minutes"
         var total = 0
         var matched = false
         Regex("""(\d+)\s*hours?""").find(lower)?.let {
@@ -234,7 +305,6 @@ class JarvisBrain(
         val cleaned = raw.trim().lowercase()
             .replace(".", "")
             .replace("  ", " ")
-        // Require AM/PM for ambiguous 12h forms; also accept 24h "19:30"
         Regex("""^(\d{1,2}):(\d{2})\s*(a\.?m\.?|p\.?m\.?)$""").find(cleaned)?.let { m ->
             var hour = m.groupValues[1].toIntOrNull() ?: return null
             val minute = m.groupValues[2].toIntOrNull() ?: return null
@@ -253,10 +323,8 @@ class JarvisBrain(
         Regex("""^(\d{1,2}):(\d{2})$""").find(cleaned)?.let { m ->
             val hour = m.groupValues[1].toIntOrNull() ?: return null
             val minute = m.groupValues[2].toIntOrNull() ?: return null
-            // 24h only when hour > 12 or explicitly 00–23 without am/pm
             if (hour !in 0..23 || minute !in 0..59) return null
             if (hour in 1..12) {
-                // Ambiguous without AM/PM — do not guess
                 return null
             }
             return JarvisCommand.SetAlarm(hour = hour, minute = minute)
@@ -297,61 +365,71 @@ class JarvisBrain(
     }
 
     companion object {
+        private const val TAG = "JarvisBrain"
+
         private val SYSTEM_PROMPT = """
-            You are Jarvis, an Android assistant command parser.
-            Convert the user's voice command into a single JSON object.
-            Supported actions only:
-            - OPEN_APP with fields: action, appName, packageName (optional)
-            - SEND_WHATSAPP_MESSAGE with fields: action, contact, message
-            - YOUTUBE_PLAY with fields: action, songName
-            - YOUTUBE_SEARCH with fields: action, query
-            - PLAY_SPOTIFY_SONG with fields: action, song, artist (optional, only if user said it)
-            - SET_TIMER with fields: action, durationSeconds (integer seconds)
-            - SET_ALARM with fields: action, hour (0-23), minute (0-59)
-            - GOOGLE_SEARCH with fields: action, query
+            You are Jarvis, a general-purpose Android AI assistant.
+            Decide the user's intent and return ONE JSON object only (no markdown).
+
+            Intent types:
+            - CHAT — normal conversation / knowledge questions. Do NOT invent device actions.
+            - SYSTEM_QUERY — device state such as battery. Use systemQuery field.
+            - ACTION / SINGLE_ACTION — one device automation.
+            - MULTI_STEP_ACTION — several automations in order (steps array).
+            - CHAT_WITH_ACTION — speak briefly AND run one action.
+
+            JSON shapes:
+            {"type":"CHAT","response":"natural spoken answer"}
+            {"type":"SYSTEM_QUERY","systemQuery":"BATTERY","response":"optional short phrase"}
+            {"type":"ACTION","action":"SET_TIMER","durationSeconds":600}
+            {"type":"MULTI_STEP_ACTION","steps":[{"action":"YOUTUBE_SEARCH","query":"..."},{"action":"OPEN_APP","appName":"YouTube"}],"response":"optional"}
+            {"type":"CHAT_WITH_ACTION","response":"...","action":"SET_TIMER","durationSeconds":600}
+
+            Supported actions:
+            - OPEN_APP: appName, packageName (optional)
+            - SEND_WHATSAPP_MESSAGE: contact, message
+            - YOUTUBE_PLAY: songName
+            - YOUTUBE_SEARCH: query
+            - PLAY_SPOTIFY_SONG: song, artist (optional)
+            - SET_TIMER: durationSeconds
+            - SET_ALARM: hour (0-23), minute (0-59)
+            - GOOGLE_SEARCH: query
+            - CLOSE_JARVIS: only when the user explicitly asks to close/dismiss/hide Jarvis UI
 
             Rules:
-            - "Open Spotify" → OPEN_APP (not PLAY_SPOTIFY_SONG; no song).
-            - "Play Kalyani" / "Play Kalyani on Spotify" / "Open Spotify and play Kalyani" → PLAY_SPOTIFY_SONG with song extracted dynamically.
-            - "Play X on YouTube" / "Open YouTube and play X" → YOUTUBE_PLAY.
-            - Do not invent an artist; omit artist unless the user said "by …".
-            - "Set a timer for 10 minutes" → SET_TIMER with durationSeconds=600.
-            - "Set an alarm for 7 AM" → SET_ALARM with hour=7, minute=0 (24-hour hour field).
+            - Prefer CHAT for questions like "What is photosynthesis?" or follow-ups ("explain more", "how old is he?").
+            - Use conversation history for pronouns and follow-ups.
+            - Never force an Android action for a normal question.
+            - "Open Spotify" → OPEN_APP. "Play Kalyani" → PLAY_SPOTIFY_SONG.
+            - "Play X on YouTube" → YOUTUBE_PLAY.
+            - Do not invent artists.
             - Do not guess AM/PM when ambiguous.
-            - "Open Google and search for Kerala weather" → GOOGLE_SEARCH query="Kerala weather".
+            - response text must be natural speech for TTS — never raw JSON.
+            - If unsupported automation: {"type":"CHAT","response":"brief honest explanation"}
+            - CLOSE_JARVIS only for explicit phrases like "Close Jarvis", "Dismiss Jarvis", "Hide Jarvis".
+            - Do NOT use CLOSE_JARVIS for "stop", "stop listening", "cancel", "I'm done", or "go back".
 
             Examples:
-            User: Open WhatsApp and send 'I will come tomorrow' to Rahul.
-            Output: {"action":"SEND_WHATSAPP_MESSAGE","contact":"Rahul","message":"I will come tomorrow"}
+            User: What is photosynthesis?
+            {"type":"CHAT","response":"Photosynthesis is how plants turn light into chemical energy..."}
 
-            User: Open Spotify
-            Output: {"action":"OPEN_APP","appName":"Spotify","packageName":"com.spotify.music"}
-
-            User: Play Kalyani
-            Output: {"action":"PLAY_SPOTIFY_SONG","song":"Kalyani"}
-
-            User: Open Spotify and play Kalyani by A.R. Rahman
-            Output: {"action":"PLAY_SPOTIFY_SONG","song":"Kalyani","artist":"A.R. Rahman"}
-
-            User: Open YouTube and play Shape of You
-            Output: {"action":"YOUTUBE_PLAY","songName":"Shape of You"}
-
-            User: Open YouTube and search lo-fi hip hop
-            Output: {"action":"YOUTUBE_SEARCH","query":"lo-fi hip hop"}
+            User: How much battery do I have?
+            {"type":"SYSTEM_QUERY","systemQuery":"BATTERY"}
 
             User: Set a timer for 10 minutes
-            Output: {"action":"SET_TIMER","durationSeconds":600}
+            {"type":"ACTION","action":"SET_TIMER","durationSeconds":600}
 
-            User: Set an alarm for 7 AM
-            Output: {"action":"SET_ALARM","hour":7,"minute":0}
+            User: Send Rahul a WhatsApp saying I'll come tomorrow
+            {"type":"ACTION","action":"SEND_WHATSAPP_MESSAGE","contact":"Rahul","message":"I'll come tomorrow"}
 
-            User: Open Google and search for Kerala weather
-            Output: {"action":"GOOGLE_SEARCH","query":"Kerala weather"}
+            User: Search YouTube for Kerala travel videos
+            {"type":"ACTION","action":"YOUTUBE_SEARCH","query":"Kerala travel videos"}
 
-            If unsupported, return:
-            {"action":"UNSUPPORTED","reason":"brief reason"}
+            User: Set a timer for 10 minutes and tell me what to do while I wait
+            {"type":"CHAT_WITH_ACTION","response":"Timer set. While you wait, stretch or drink some water.","action":"SET_TIMER","durationSeconds":600}
 
-            Return JSON only. No markdown.
+            User: Close Jarvis
+            {"type":"ACTION","action":"CLOSE_JARVIS"}
         """.trimIndent()
     }
 }

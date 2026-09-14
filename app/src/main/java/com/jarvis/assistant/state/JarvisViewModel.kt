@@ -5,13 +5,18 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.jarvis.assistant.accessibility.JarvisAccessibilityService
+import com.jarvis.assistant.ai.AssistantTurnResult
+import com.jarvis.assistant.ai.ConversationMemoryTurn
 import com.jarvis.assistant.ai.JarvisBrain
 import com.jarvis.assistant.android.AppLauncher
+import com.jarvis.assistant.android.SystemInfoHelper
 import com.jarvis.assistant.assistant.AssistantRoleHelper
 import com.jarvis.assistant.commands.CommandExecutor
 import com.jarvis.assistant.commands.CommandResult
 import com.jarvis.assistant.commands.ConfirmationPhraseParser
 import com.jarvis.assistant.commands.JarvisCommand
+import com.jarvis.assistant.conversation.ConversationMemory
+import com.jarvis.assistant.conversation.ConversationSilenceController
 import com.jarvis.assistant.overlay.JarvisOverlayController
 import com.jarvis.assistant.settings.JarvisSettings
 import com.jarvis.assistant.settings.SettingsRepository
@@ -20,7 +25,9 @@ import com.jarvis.assistant.ui.SettingsScreenState
 import com.jarvis.assistant.utils.AccessibilityUtils
 import com.jarvis.assistant.voice.AndroidSpeechRecognizerManager
 import com.jarvis.assistant.voice.MicForegroundGate
+import com.jarvis.assistant.voice.MicrophoneSessionManager
 import com.jarvis.assistant.voice.SpeechRecognizerManager
+import com.jarvis.assistant.wake.JarvisAckPhrases
 import com.jarvis.assistant.wake.JarvisHandsFreeController
 import com.jarvis.assistant.wake.WakePhraseParser
 import kotlinx.coroutines.Job
@@ -41,6 +48,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val tts = JarvisTTS(application)
     private val overlay = JarvisOverlayController.getInstance(application)
     private val handsFree = JarvisHandsFreeController.getInstance(application)
+    private val conversationMemory = ConversationMemory()
+    private val micSession = MicrophoneSessionManager()
+    private val silenceController = ConversationSilenceController {
+        viewModelScope.launch { endConversation(reason = "silence") }
+    }
 
     private val _uiState = MutableStateFlow(JarvisUiState())
     val uiState: StateFlow<JarvisUiState> = _uiState.asStateFlow()
@@ -55,6 +67,16 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private var listeningForConfirmation = false
     /** Start confirmation mic after TTS finishes so Jarvis does not hear itself. */
     private var pendingConfirmationListen = false
+    /** After TTS, resume conversational listening (not confirmation). */
+    private var pendingConversationResume = false
+    private var conversationActive = false
+    /** Prevent TTS audio from being treated as a user command. */
+    private var suppressSttWhileSpeaking = false
+    /** True while listening only for “Jarvis stop” during TTS. */
+    private var listeningForInterrupt = false
+    /** Command to run after a wake acknowledgment finishes speaking. */
+    private var pendingAfterAckCommand: String? = null
+    private var bargeInJob: Job? = null
 
     init {
         overlay.hostCallbacks = object : JarvisOverlayController.HostCallbacks {
@@ -66,18 +88,90 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             override fun onDismissPanel() = dismissFloatingPanel()
         }
         handsFree.bindHost(object : JarvisHandsFreeController.Host {
-            override fun activateMicrophone() = startListening()
+            override fun activateMicrophone(acknowledge: Boolean, commandAfterAck: String) =
+                startListening(acknowledge = acknowledge, commandAfterAck = commandAfterAck)
             override fun submitCommand(text: String) = submitTextCommand(text)
             override fun isListening(): Boolean = _uiState.value.isListening
             override fun currentPhase(): JarvisPhase = _uiState.value.phase
+            override fun isConversationActive(): Boolean = conversationActive
         })
         tts.listener = object : JarvisTTS.Listener {
-            override fun onTtsStarted() = handsFree.onTtsStarted()
+            override fun onTtsStarted() {
+                Log.i(TAG, "TTS_STARTED")
+                suppressSttWhileSpeaking = true
+                silenceController.onJarvisActivity()
+                micSession.setSpeaking()
+                handsFree.onTtsStarted()
+                if (_uiState.value.phase != JarvisPhase.CONFIRMATION &&
+                    _uiState.value.phase != JarvisPhase.SENDING
+                ) {
+                    _uiState.update {
+                        it.copy(phase = JarvisPhase.SPEAKING, statusText = "Speaking…")
+                    }
+                }
+                // Allow “Jarvis stop” barge-in while speaking.
+                scheduleBargeInListening()
+            }
+
             override fun onTtsFinished() {
+                Log.i(TAG, "TTS_FINISHED")
+                cancelBargeInListening()
+                listeningForInterrupt = false
+                suppressSttWhileSpeaking = false
+                silenceController.onJarvisIdle()
                 handsFree.onTtsFinished()
+                // Leave SPEAKING ownership so mic can be acquired immediately.
+                micSession.setWaitingForUser()
+
+                val afterAck = pendingAfterAckCommand
+                if (!afterAck.isNullOrBlank()) {
+                    pendingAfterAckCommand = null
+                    pendingConversationResume = false
+                    handleFinalTranscription(afterAck)
+                    return
+                }
                 if (pendingConfirmationListen && isAwaitingSendConfirmation()) {
                     pendingConfirmationListen = false
+                    pendingConversationResume = false
                     startConfirmationListening()
+                    return
+                }
+                val shouldResumeMic = conversationActive &&
+                    !isAwaitingSendConfirmation() &&
+                    (
+                        pendingConversationResume ||
+                            (
+                                pipelineJob?.isActive != true &&
+                                    _uiState.value.phase in setOf(
+                                        JarvisPhase.SPEAKING,
+                                        JarvisPhase.COMPLETED,
+                                        JarvisPhase.WAITING_FOR_USER
+                                    )
+                                )
+                        )
+                if (shouldResumeMic) {
+                    pendingConversationResume = false
+                    resumeConversationListening()
+                    return
+                }
+                // Intermediate status TTS during an action — keep working, don't open mic yet.
+                if (_uiState.value.phase == JarvisPhase.SPEAKING && pipelineJob?.isActive == true) {
+                    _uiState.update {
+                        it.copy(phase = JarvisPhase.EXECUTING, statusText = "Working…")
+                    }
+                }
+            }
+        }
+        speech.activityListener = object : SpeechRecognizerManager.ActivityListener {
+            override fun onSpeechBeginning() {
+                if (conversationActive && !listeningForConfirmation) {
+                    silenceController.onUserActivity()
+                }
+            }
+
+            override fun onSpeechEnding() {
+                if (conversationActive && !listeningForConfirmation) {
+                    silenceController.onUserIdle()
                 }
             }
         }
@@ -98,14 +192,21 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         speechCollectJob = viewModelScope.launch {
             speech.state.collect { speechState ->
+                if (suppressSttWhileSpeaking && !listeningForInterrupt && !listeningForConfirmation) {
+                    // Ignore STT updates while Jarvis is speaking (anti echo-loop),
+                    // unless we are in barge-in interrupt mode.
+                    return@collect
+                }
                 _uiState.update { current ->
                     current.copy(
-                        isListening = speechState.isListening,
-                        liveTranscription = speechState.liveTranscription.ifBlank {
-                            current.liveTranscription
+                        isListening = speechState.isListening || listeningForInterrupt,
+                        liveTranscription = if (listeningForInterrupt) {
+                            speechState.liveTranscription.ifBlank { current.liveTranscription }
+                        } else {
+                            speechState.liveTranscription.ifBlank { current.liveTranscription }
                         },
                         audioLevel = speechState.rmsLevel,
-                        errorMessage = if (listeningForConfirmation) {
+                        errorMessage = if (listeningForConfirmation || listeningForInterrupt) {
                             null
                         } else {
                             speechState.error ?: current.errorMessage
@@ -113,16 +214,22 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         phase = when {
                             speechState.isListening && listeningForConfirmation ->
                                 JarvisPhase.CONFIRMATION
+                            listeningForInterrupt && current.phase == JarvisPhase.SPEAKING ->
+                                JarvisPhase.SPEAKING
                             speechState.isListening -> JarvisPhase.LISTENING
                             current.phase == JarvisPhase.LISTENING &&
+                                speechState.finalTranscription.isNotBlank() -> JarvisPhase.TRANSCRIBING
+                            current.phase == JarvisPhase.WAITING_FOR_USER &&
                                 speechState.finalTranscription.isNotBlank() -> JarvisPhase.TRANSCRIBING
                             else -> current.phase
                         },
                         statusText = when {
                             speechState.isListening && listeningForConfirmation ->
                                 "Say Send or Cancel…"
+                            listeningForInterrupt -> "Speaking… (say Jarvis stop)"
                             speechState.isListening -> "Listening…"
-                            current.phase == JarvisPhase.LISTENING &&
+                            (current.phase == JarvisPhase.LISTENING ||
+                                current.phase == JarvisPhase.WAITING_FOR_USER) &&
                                 speechState.finalTranscription.isNotBlank() -> "Transcribing…"
                             else -> current.statusText
                         }
@@ -134,15 +241,32 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     finalText.isNotBlank() &&
                     finalText != lastHandledTranscription
                 ) {
-                    if (listeningForConfirmation && isAwaitingSendConfirmation()) {
+                    if (listeningForInterrupt) {
+                        lastHandledTranscription = finalText
+                        listeningForInterrupt = false
+                        if (WakePhraseParser.isStopCommand(finalText)) {
+                            handleStopInterrupt()
+                        } else {
+                            // Ignore non-stop phrases during barge-in (likely TTS echo).
+                            Log.d(TAG, "Barge-in ignored non-stop phrase")
+                        }
+                    } else if (listeningForConfirmation && isAwaitingSendConfirmation()) {
                         lastHandledTranscription = finalText
                         listeningForConfirmation = false
                         stopMicForeground()
                         handleConfirmationVoice(finalText)
-                    } else if (_uiState.value.phase == JarvisPhase.TRANSCRIBING) {
+                    } else if (_uiState.value.phase == JarvisPhase.TRANSCRIBING ||
+                        conversationActive
+                    ) {
                         lastHandledTranscription = finalText
                         handleFinalTranscription(finalText)
                     }
+                } else if (!speechState.isListening &&
+                    !speechState.error.isNullOrBlank() &&
+                    listeningForInterrupt
+                ) {
+                    listeningForInterrupt = false
+                    // Soft fail — keep TTS / wait for TTS finish to resume normal mic.
                 } else if (!speechState.isListening &&
                     !speechState.error.isNullOrBlank() &&
                     listeningForConfirmation
@@ -165,9 +289,43 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 } else if (!speechState.isListening &&
                     !speechState.error.isNullOrBlank() &&
+                    conversationActive &&
+                    !listeningForConfirmation &&
+                    _uiState.value.phase in setOf(
+                        JarvisPhase.LISTENING,
+                        JarvisPhase.WAITING_FOR_USER
+                    )
+                ) {
+                    // Soft STT errors during conversation: keep session, let silence timer decide.
+                    stopMicForeground()
+                    micSession.setWaitingForUser()
+                    silenceController.onUserIdle()
+                    _uiState.update {
+                        it.copy(
+                            isListening = false,
+                            phase = JarvisPhase.WAITING_FOR_USER,
+                            statusText = "Waiting for you…",
+                            errorMessage = null
+                        )
+                    }
+                    // Restart listening shortly so conversation can continue; silence still counts.
+                    viewModelScope.launch {
+                        delay(400)
+                        if (conversationActive &&
+                            !_uiState.value.isListening &&
+                            !suppressSttWhileSpeaking &&
+                            !isAwaitingSendConfirmation()
+                        ) {
+                            resumeConversationListening()
+                        }
+                    }
+                } else if (!speechState.isListening &&
+                    !speechState.error.isNullOrBlank() &&
+                    !conversationActive &&
                     _uiState.value.phase == JarvisPhase.LISTENING
                 ) {
                     stopMicForeground()
+                    micSession.release()
                     _uiState.update {
                         it.copy(
                             phase = JarvisPhase.ERROR,
@@ -189,7 +347,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun requestOverlayPermissionIntent(): android.content.Intent = overlay.overlayPermissionIntent()
 
     fun dismissFloatingPanel() {
-        // User-initiated only (X / swipe). Do not stop speech pipelines here.
+        // Explicit only: X / swipe / CLOSE_JARVIS.
+        endConversation(reason = "dismiss")
         overlay.dismissOverlay()
         resetToIdle()
     }
@@ -238,8 +397,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         _settingsState.update { it.copy(microphoneGranted = granted) }
         if (!granted) {
-            Log.e("JarvisViewModel", "JARVIS_MIC_PERMISSION_MISSING")
+            Log.e(TAG, "JARVIS_MIC_PERMISSION_MISSING")
             handsFree.onMicPermissionLost()
+            if (conversationActive) {
+                endConversation(reason = "mic_permission")
+            }
         } else {
             handsFree.onMicPermissionGranted()
         }
@@ -291,9 +453,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         handsFree.setHandsFreeEnabled(enabled)
         flashSettingsMessage(
             if (enabled) {
-                "Hands-free Jarvis enabled."
+                "System assistant invocations enabled."
             } else {
-                "Hands-free Jarvis off. Microphone button still works."
+                "System assistant invocations off. Microphone button still works."
             }
         )
         refreshSettingsState()
@@ -309,9 +471,53 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun speak(text: String) {
+    private fun speak(text: String, resumeConversationAfter: Boolean = false) {
+        if (resumeConversationAfter && conversationActive) {
+            pendingConversationResume = true
+        }
         if (settingsRepository.get().ttsEnabled) {
-            tts.speak(text)
+            // Stop normal mic before speaking so Jarvis does not hear itself.
+            if (_uiState.value.isListening && !listeningForInterrupt) {
+                try {
+                    speech.stopListening()
+                } catch (_: Throwable) {
+                }
+                stopMicForeground()
+            }
+            val started = tts.speak(text)
+            if (!started) {
+                // TTS unavailable — clear speaking state and resume mic immediately.
+                suppressSttWhileSpeaking = false
+                micSession.setWaitingForUser()
+                if (pendingAfterAckCommand != null) {
+                    val cmd = pendingAfterAckCommand
+                    pendingAfterAckCommand = null
+                    if (!cmd.isNullOrBlank()) handleFinalTranscription(cmd)
+                } else if (resumeConversationAfter && conversationActive) {
+                    pendingConversationResume = false
+                    resumeConversationListening()
+                }
+            } else if (resumeConversationAfter && conversationActive) {
+                // Safety net if onDone never arrives.
+                viewModelScope.launch {
+                    delay(20_000)
+                    if (pendingConversationResume && conversationActive &&
+                        !tts.isSpeaking() &&
+                        !isAwaitingSendConfirmation()
+                    ) {
+                        pendingConversationResume = false
+                        suppressSttWhileSpeaking = false
+                        silenceController.onJarvisIdle()
+                        resumeConversationListening()
+                    }
+                }
+            }
+        } else if (resumeConversationAfter && conversationActive) {
+            pendingConversationResume = false
+            viewModelScope.launch {
+                delay(150)
+                resumeConversationListening()
+            }
         }
     }
 
@@ -322,9 +528,19 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             handleConfirmationVoice(trimmedInput)
             return
         }
+        if (WakePhraseParser.isStopCommand(trimmedInput)) {
+            handleStopInterrupt()
+            return
+        }
         val trimmed = WakePhraseParser.stripWakePhrase(trimmedInput)
-        if (trimmed.isBlank()) return
-        stopListening()
+        if (trimmed.isBlank()) {
+            // User only said “Jarvis”.
+            beginConversationSessionIfNeeded()
+            acknowledgeCallThenListen()
+            return
+        }
+        beginConversationSessionIfNeeded()
+        stopListeningInternal(keepConversation = true)
         lastHandledTranscription = trimmed
         _uiState.update {
             it.copy(
@@ -332,57 +548,94 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 finalTranscription = trimmed,
                 phase = JarvisPhase.TRANSCRIBING,
                 statusText = "Transcribing…",
-                errorMessage = null
+                errorMessage = null,
+                conversationActive = true
             )
         }
         handleFinalTranscription(trimmed)
     }
 
     fun toggleListening() {
+        // Tap mic while speaking → treat as stop / interrupt.
+        if (_uiState.value.phase == JarvisPhase.SPEAKING || tts.isSpeaking()) {
+            handleStopInterrupt()
+            return
+        }
         if (_uiState.value.isListening) {
-            stopListening()
+            if (conversationActive) {
+                endConversation(reason = "manual_stop")
+            } else {
+                stopListening()
+            }
         } else if (isAwaitingSendConfirmation()) {
             startConfirmationListening()
         } else {
-            startListening()
+            startListening(acknowledge = false)
         }
     }
 
-    fun startListening() {
+    fun startListening(acknowledge: Boolean = false, commandAfterAck: String = "") {
         val phase = _uiState.value.phase
         val canStart = phase in setOf(
             JarvisPhase.IDLE,
             JarvisPhase.COMPLETED,
             JarvisPhase.ERROR,
             JarvisPhase.CONFIRMATION,
-            JarvisPhase.LISTENING
+            JarvisPhase.LISTENING,
+            JarvisPhase.WAITING_FOR_USER,
+            JarvisPhase.ENDING,
+            JarvisPhase.SPEAKING
         )
         if (!canStart) return
-        if (_uiState.value.isListening && phase == JarvisPhase.LISTENING) {
-            // Duplicate protection — do not start a second recognizer session.
+        if (_uiState.value.isListening && phase == JarvisPhase.LISTENING && !acknowledge) {
             return
         }
 
+        beginConversationSessionIfNeeded()
         pipelineJob?.cancel()
         lastHandledTranscription = null
+        pendingConversationResume = false
+        cancelBargeInListening()
+        listeningForInterrupt = false
+
+        if (acknowledge) {
+            if (commandAfterAck.isNotBlank()) {
+                pendingAfterAckCommand = commandAfterAck.trim()
+            }
+            acknowledgeCallThenListen()
+            return
+        }
+
         handsFree.onManualListeningStarted()
+        if (!micSession.forceAcquireListening()) {
+            return
+        }
         startMicForeground()
+        silenceController.onUserActivity()
         _uiState.update {
             it.copy(
                 phase = JarvisPhase.LISTENING,
                 statusText = "Listening…",
                 liveTranscription = "",
                 finalTranscription = "",
-                assistantMessage = "",
+                assistantMessage = if (conversationMemory.isEmpty()) "" else it.assistantMessage,
                 previewMessage = null,
                 confirmationTitle = null,
                 pendingSend = null,
                 contactChoices = emptyList(),
                 errorMessage = null,
-                isListening = true
+                isListening = true,
+                conversationActive = true
             )
         }
-        speech.startListening()
+        try {
+            speech.startListening()
+        } catch (t: Throwable) {
+            Log.e(TAG, "ASSISTANT_ERROR startListening", t)
+            stopMicForeground()
+            micSession.release()
+            fail("Your microphone permission is required for voice interaction.")
+        }
     }
 
     fun stopListening() {
@@ -390,6 +643,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         listeningForConfirmation = false
         speech.stopListening()
         stopMicForeground()
+        micSession.release()
         if (wasConfirmation && _uiState.value.pendingSend != null) {
             _uiState.update {
                 it.copy(
@@ -417,35 +671,49 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun stopListeningInternal(keepConversation: Boolean) {
+        listeningForConfirmation = false
+        try {
+            speech.stopListening()
+        } catch (_: Throwable) {
+        }
+        stopMicForeground()
+        if (keepConversation) {
+            micSession.setProcessing()
+        } else {
+            micSession.release()
+        }
+        _uiState.update { it.copy(isListening = false) }
+    }
+
     fun confirmSend() {
         val pending = _uiState.value.pendingSend ?: return
         stopConfirmationListeningOnly()
         pendingConfirmationListen = false
+        silenceController.pause()
         pipelineJob?.cancel()
         pipelineJob = viewModelScope.launch {
-            // Return to WhatsApp so Accessibility can click Send on the prepared draft.
             appLauncher.openWhatsApp()
             delay(700)
             setPhase(JarvisPhase.SENDING, "Sending…", "Sending message…")
+            Log.i(TAG, "ACTION_STARTED")
             val result = executor.confirmAndSend(pending.contact, pending.message) { progress ->
                 _uiState.update {
                     it.copy(assistantMessage = progress, statusText = "Working…")
                 }
             }
+            Log.i(TAG, "ACTION_RESULT")
             presentJarvisUiAfterAutomation()
             delay(300)
             when (result) {
                 CommandResult.Success -> {
-                    setPhase(
-                        JarvisPhase.COMPLETED,
-                        "Completed",
-                        "Message sent to ${pending.contact}."
-                    )
-                    speak("Message sent.")
-                    // Keep COMPLETED visible until the user dismisses the floating panel.
+                    val msg = "Message sent to ${pending.contact}."
+                    conversationMemory.addAssistant(msg)
+                    setPhase(JarvisPhase.COMPLETED, "Completed", msg)
+                    speak("Message sent.", resumeConversationAfter = conversationActive)
                 }
-                is CommandResult.Failure -> fail(result.message)
-                else -> fail("Unexpected send result.")
+                is CommandResult.Failure -> fail(result.message, keepConversation = conversationActive)
+                else -> fail("Unexpected send result.", keepConversation = conversationActive)
             }
         }
     }
@@ -454,10 +722,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         stopConfirmationListeningOnly()
         pendingConfirmationListen = false
         pipelineJob?.cancel()
+        conversationMemory.addAssistant("Cancelled.")
         _uiState.update {
             it.copy(
-                phase = JarvisPhase.IDLE,
-                statusText = "Ready",
+                phase = if (conversationActive) JarvisPhase.WAITING_FOR_USER else JarvisPhase.IDLE,
+                statusText = if (conversationActive) "Waiting for you…" else "Ready",
                 assistantMessage = "Cancelled.",
                 confirmationTitle = null,
                 previewMessage = null,
@@ -465,7 +734,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 isListening = false
             )
         }
-        speak("Cancelled.")
+        speak("Cancelled.", resumeConversationAfter = conversationActive)
     }
 
     fun selectContact(choice: String) {
@@ -479,16 +748,211 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun handleFinalTranscription(text: String) {
-        stopMicForeground()
-        // Never send a wake-only utterance ("Jarvis") to OpenAI.
-        val commandText = WakePhraseParser.stripWakePhrase(text)
-        if (commandText.isBlank()) {
-            Log.i("JarvisViewModel", "Wake-only utterance ignored; listening again")
-            startListening()
+    private fun beginConversationSessionIfNeeded() {
+        if (conversationActive) {
+            overlay.ensureFloatingUiVisible()
             return
         }
-        Log.i("JarvisViewModel", "JARVIS_COMMAND_RECEIVED")
+        conversationActive = true
+        conversationMemory.clear()
+        silenceController.startSession()
+        overlay.ensureFloatingUiVisible()
+        Log.i(TAG, "ASSISTANT_SESSION_CREATED")
+    }
+
+    private fun endConversation(reason: String) {
+        if (!conversationActive && _uiState.value.phase == JarvisPhase.IDLE) {
+            stopListeningInternal(keepConversation = false)
+            return
+        }
+        Log.i(TAG, "CONVERSATION_ENDED reason=$reason")
+        conversationActive = false
+        pendingConversationResume = false
+        pendingConfirmationListen = false
+        pendingAfterAckCommand = null
+        listeningForConfirmation = false
+        listeningForInterrupt = false
+        suppressSttWhileSpeaking = false
+        cancelBargeInListening()
+        try {
+            tts.stop(notify = false)
+        } catch (_: Throwable) {
+        }
+        silenceController.stopSession()
+        conversationMemory.clear()
+        micSession.setEnding()
+        try {
+            speech.stopListening()
+        } catch (_: Throwable) {
+        }
+        stopMicForeground()
+        micSession.release()
+        pipelineJob?.cancel()
+        // Mic/conversation stop — floating UI stays unless this was an explicit dismiss.
+        _uiState.update {
+            it.copy(
+                phase = JarvisPhase.IDLE,
+                statusText = "Ready",
+                isListening = false,
+                conversationActive = false,
+                liveTranscription = "",
+                confirmationTitle = null,
+                previewMessage = null,
+                pendingSend = null,
+                contactChoices = emptyList(),
+                errorMessage = null
+            )
+        }
+    }
+
+    private fun resumeConversationListening() {
+        if (!conversationActive) return
+        if (isAwaitingSendConfirmation()) return
+        if (tts.isSpeaking()) return
+        cancelBargeInListening()
+        listeningForInterrupt = false
+        suppressSttWhileSpeaking = false
+
+        if (!micSession.forceAcquireListening()) {
+            Log.w(TAG, "Could not force-acquire mic after TTS")
+            return
+        }
+        lastHandledTranscription = null
+        handsFree.onManualListeningStarted()
+        startMicForeground()
+        silenceController.onUserIdle()
+        _uiState.update {
+            it.copy(
+                phase = JarvisPhase.LISTENING,
+                statusText = "Listening…",
+                isListening = true,
+                liveTranscription = "",
+                errorMessage = null,
+                conversationActive = true
+            )
+        }
+        try {
+            speech.startListening()
+            Log.i(TAG, "MIC_STARTED after TTS")
+        } catch (t: Throwable) {
+            Log.e(TAG, "ASSISTANT_ERROR resumeListening", t)
+            stopMicForeground()
+            micSession.setWaitingForUser()
+            silenceController.onUserIdle()
+            // Retry once shortly.
+            viewModelScope.launch {
+                delay(350)
+                if (conversationActive && !tts.isSpeaking() && !_uiState.value.isListening) {
+                    resumeConversationListening()
+                }
+            }
+        }
+    }
+
+    private fun acknowledgeCallThenListen() {
+        beginConversationSessionIfNeeded()
+        handsFree.onManualListeningStarted()
+        cancelBargeInListening()
+        listeningForInterrupt = false
+        try {
+            speech.stopListening()
+        } catch (_: Throwable) {
+        }
+        stopMicForeground()
+        val ack = JarvisAckPhrases.forCall()
+        conversationMemory.addAssistant(ack)
+        _uiState.update {
+            it.copy(
+                phase = JarvisPhase.SPEAKING,
+                statusText = "Speaking…",
+                assistantMessage = ack,
+                conversationActive = true,
+                isListening = false
+            )
+        }
+        speak(ack, resumeConversationAfter = true)
+    }
+
+    private fun handleStopInterrupt() {
+        Log.i(TAG, "STOP interrupt")
+        cancelBargeInListening()
+        listeningForInterrupt = false
+        pendingAfterAckCommand = null
+        pipelineJob?.cancel()
+        try {
+            tts.stop(notify = false)
+        } catch (_: Throwable) {
+        }
+        suppressSttWhileSpeaking = false
+        beginConversationSessionIfNeeded()
+        val ack = JarvisAckPhrases.forStopInterrupt()
+        conversationMemory.addAssistant(ack)
+        _uiState.update {
+            it.copy(
+                phase = JarvisPhase.SPEAKING,
+                statusText = "Speaking…",
+                assistantMessage = ack,
+                conversationActive = true,
+                isListening = false,
+                errorMessage = null
+            )
+        }
+        speak(ack, resumeConversationAfter = true)
+    }
+
+    private fun scheduleBargeInListening() {
+        cancelBargeInListening()
+        if (!conversationActive) return
+        if (isAwaitingSendConfirmation()) return
+        bargeInJob = viewModelScope.launch {
+            // Give TTS audio focus a moment, then listen only for stop.
+            delay(450)
+            if (!tts.isSpeaking() || !conversationActive) return@launch
+            listeningForInterrupt = true
+            suppressSttWhileSpeaking = false
+            try {
+                startMicForeground()
+                speech.startListening()
+                Log.i(TAG, "BARGE_IN listening for stop")
+            } catch (t: Throwable) {
+                Log.d(TAG, "Barge-in listen unavailable", t)
+                listeningForInterrupt = false
+                suppressSttWhileSpeaking = true
+            }
+        }
+    }
+
+    private fun cancelBargeInListening() {
+        bargeInJob?.cancel()
+        bargeInJob = null
+        if (listeningForInterrupt) {
+            listeningForInterrupt = false
+            try {
+                speech.stopListening()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun handleFinalTranscription(text: String) {
+        stopMicForeground()
+        micSession.setProcessing()
+        silenceController.onUserIdle()
+        cancelBargeInListening()
+
+        if (WakePhraseParser.isStopCommand(text)) {
+            handleStopInterrupt()
+            return
+        }
+
+        val commandText = WakePhraseParser.stripWakePhrase(text)
+        if (commandText.isBlank()) {
+            Log.i(TAG, "Wake-only utterance — acknowledge")
+            acknowledgeCallThenListen()
+            return
+        }
+        Log.i(TAG, "STT_RESULT")
+        conversationMemory.addUser(commandText)
         pipelineJob?.cancel()
         pipelineJob = viewModelScope.launch {
             _uiState.update {
@@ -497,72 +961,203 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     statusText = "Thinking…",
                     finalTranscription = commandText,
                     liveTranscription = commandText,
-                    assistantMessage = "Understanding command…"
+                    assistantMessage = "Thinking…"
                 )
             }
 
-            val command = brain.understandCommand(commandText).getOrElse { error ->
-                brain.parseHeuristic(commandText)
-                    ?: return@launch fail(
-                        error.message ?: "Could not understand the command."
+            val history = conversationMemory.snapshot()
+                .dropLast(1) // current user turn is sent separately
+                .map {
+                    ConversationMemoryTurn(
+                        role = when (it.role) {
+                            ConversationMemory.Role.USER -> "user"
+                            ConversationMemory.Role.ASSISTANT -> "assistant"
+                        },
+                        content = it.content
                     )
-            }.let { parsed ->
-                // Prefer structured API result; heuristic already used as fallback above.
-                parsed
+                }
+
+            val turn = brain.understandTurn(commandText, history).getOrElse { error ->
+                brain.parseHeuristicTurn(commandText)
+                    ?: return@launch fail(
+                        error.message ?: "I couldn't understand that.",
+                        keepConversation = conversationActive
+                    )
             }
 
-            // If OpenAI is missing, understandCommand fails fast — heuristic covers WhatsApp phrases.
-            runCommand(command)
+            handleAssistantTurn(turn)
         }
     }
 
-    private suspend fun runCommand(command: JarvisCommand) {
+    private suspend fun handleAssistantTurn(turn: AssistantTurnResult) {
+        when (turn) {
+            is AssistantTurnResult.Chat -> {
+                conversationMemory.addAssistant(turn.response)
+                setPhase(JarvisPhase.SPEAKING, "Speaking…", turn.response)
+                speak(turn.response, resumeConversationAfter = true)
+            }
+            is AssistantTurnResult.SystemQuery -> {
+                val spoken = when (turn.queryId.uppercase()) {
+                    "BATTERY", "BATTERY_LEVEL", "BATTERY_STATUS" ->
+                        SystemInfoHelper.batteryStatusSpeech(getApplication())
+                    else -> turn.spokenFallback
+                        ?: "I don't have that system information yet."
+                }
+                conversationMemory.addAssistant(spoken)
+                setPhase(JarvisPhase.SPEAKING, "Speaking…", spoken)
+                speak(spoken, resumeConversationAfter = true)
+            }
+            is AssistantTurnResult.Action -> {
+                Log.i(TAG, "ACTION_STARTED")
+                runCommand(turn.command)
+            }
+            is AssistantTurnResult.ChatWithAction -> {
+                conversationMemory.addAssistant(turn.response)
+                Log.i(TAG, "ACTION_STARTED")
+                runCommand(turn.command, preSpeak = turn.response)
+            }
+            is AssistantTurnResult.MultiStep -> {
+                turn.response?.let { conversationMemory.addAssistant(it) }
+                Log.i(TAG, "ACTION_STARTED")
+                runMultiStep(turn.steps, turn.response)
+            }
+        }
+    }
+
+    private suspend fun runMultiStep(steps: List<JarvisCommand>, intro: String?) {
+        if (!intro.isNullOrBlank()) {
+            speak(intro)
+            delay(400)
+        }
+        for ((index, step) in steps.withIndex()) {
+            setPhase(
+                JarvisPhase.EXECUTING,
+                "Working…",
+                "Step ${index + 1} of ${steps.size}…"
+            )
+            // WhatsApp confirmation must interrupt the multi-step chain.
+            if (step is JarvisCommand.SendWhatsAppMessage) {
+                runWhatsAppPipeline(step)
+                return
+            }
+            if (step is JarvisCommand.CloseJarvis) {
+                runCommand(step)
+                return
+            }
+            val ok = executeAutomationStep(step)
+            if (!ok) return
+        }
+        val done = "All steps completed."
+        conversationMemory.addAssistant(done)
+        setPhase(JarvisPhase.COMPLETED, "Completed", done)
+        speak(done, resumeConversationAfter = conversationActive)
+        Log.i(TAG, "ACTION_RESULT")
+    }
+
+    private suspend fun executeAutomationStep(command: JarvisCommand): Boolean {
+        presentJarvisUiAfterAutomation()
+        when (val result = executor.execute(command) { progress ->
+            presentJarvisUiAfterAutomation()
+            _uiState.update {
+                it.copy(assistantMessage = progress, statusText = "Working…")
+            }
+        }) {
+            CommandResult.Success -> {
+                Log.i(TAG, "ACTION_RESULT")
+                return true
+            }
+            is CommandResult.NeedsConfirmation,
+            is CommandResult.NeedsContactChoice -> {
+                // Should not happen for non-WhatsApp; treat as failure for chain.
+                fail("That step needs confirmation and stopped the multi-step plan.", keepConversation = true)
+                return false
+            }
+            is CommandResult.Failure -> {
+                Log.i(TAG, "ACTION_RESULT")
+                fail(result.message, keepConversation = conversationActive)
+                return false
+            }
+            is CommandResult.Progress -> return true
+        }
+    }
+
+    private suspend fun runCommand(command: JarvisCommand, preSpeak: String? = null) {
         when (command) {
-            is JarvisCommand.SendWhatsAppMessage -> runWhatsAppPipeline(command)
-            is JarvisCommand.YouTubePlay -> runYouTubePlay(command)
-            is JarvisCommand.YouTubeSearch -> runYouTubeSearch(command)
+            is JarvisCommand.CloseJarvis -> {
+                speak("Closing, sir.")
+                delay(400)
+                dismissFloatingPanel()
+            }
+            is JarvisCommand.SendWhatsAppMessage -> {
+                if (!preSpeak.isNullOrBlank()) speak(preSpeak)
+                runWhatsAppPipeline(command)
+            }
+            is JarvisCommand.YouTubePlay -> {
+                if (!preSpeak.isNullOrBlank()) {
+                    conversationMemory.addAssistant(preSpeak)
+                    speak(preSpeak)
+                }
+                runYouTubePlay(command)
+            }
+            is JarvisCommand.YouTubeSearch -> {
+                if (!preSpeak.isNullOrBlank()) {
+                    conversationMemory.addAssistant(preSpeak)
+                    speak(preSpeak)
+                }
+                runYouTubeSearch(command)
+            }
             is JarvisCommand.PlaySpotifySong -> runSimpleAutomation(
-                speaking = "Opening Spotify.",
+                speaking = preSpeak ?: "Opening Spotify.",
                 executingMessage = "Opening Spotify…",
                 command = command,
                 successSpeak = "Playing ${command.song}.",
                 successMessage = "Playing ${command.song}."
             )
             is JarvisCommand.SetTimer -> runSimpleAutomation(
-                speaking = "Setting a timer.",
+                speaking = preSpeak ?: "Setting a timer.",
                 executingMessage = "Setting timer…",
                 command = command,
                 successSpeak = "Timer set.",
                 successMessage = "Timer set."
             )
             is JarvisCommand.SetAlarm -> runSimpleAutomation(
-                speaking = "Setting an alarm.",
+                speaking = preSpeak ?: "Setting an alarm.",
                 executingMessage = "Setting alarm…",
                 command = command,
                 successSpeak = "Alarm set.",
                 successMessage = "Alarm set."
             )
             is JarvisCommand.GoogleSearch -> runSimpleAutomation(
-                speaking = "Searching Google.",
+                speaking = preSpeak ?: "Searching Google.",
                 executingMessage = "Searching Google…",
                 command = command,
                 successSpeak = "Search completed.",
                 successMessage = "Search completed."
             )
             is JarvisCommand.OpenApp -> {
+                if (!preSpeak.isNullOrBlank()) speak(preSpeak)
                 setPhase(JarvisPhase.EXECUTING, "Working…", "Opening ${command.appName}…")
                 when (val result = executor.execute(command) { msg ->
                     _uiState.update { it.copy(assistantMessage = msg) }
                 }) {
                     CommandResult.Success -> {
-                        speak("${command.appName} is open.")
-                        setPhase(JarvisPhase.COMPLETED, "Completed", "${command.appName} opened.")
+                        val msg = "${command.appName} opened."
+                        conversationMemory.addAssistant(msg)
+                        setPhase(JarvisPhase.COMPLETED, "Completed", msg)
+                        speak("${command.appName} is open.", resumeConversationAfter = conversationActive)
+                        Log.i(TAG, "ACTION_RESULT")
                     }
-                    is CommandResult.Failure -> fail(result.message)
-                    else -> fail("Unexpected result.")
+                    is CommandResult.Failure -> fail(result.message, keepConversation = conversationActive)
+                    else -> fail("Unexpected result.", keepConversation = conversationActive)
                 }
             }
-            is JarvisCommand.Unsupported -> fail(command.reason)
+            is JarvisCommand.Unsupported -> {
+                // Treat unsupported as chat so conversation continues.
+                val msg = command.reason
+                conversationMemory.addAssistant(msg)
+                setPhase(JarvisPhase.SPEAKING, "Speaking…", msg)
+                speak(msg, resumeConversationAfter = conversationActive)
+            }
         }
     }
 
@@ -584,14 +1179,16 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }) {
             CommandResult.Success -> {
                 presentJarvisUiAfterAutomation()
+                conversationMemory.addAssistant(successMessage)
                 setPhase(JarvisPhase.COMPLETED, "Completed", successMessage)
-                speak(successSpeak)
+                speak(successSpeak, resumeConversationAfter = conversationActive)
+                Log.i(TAG, "ACTION_RESULT")
             }
             is CommandResult.Failure -> {
                 presentJarvisUiAfterAutomation()
-                fail(result.message)
+                fail(result.message, keepConversation = conversationActive)
             }
-            else -> fail("Unexpected result.")
+            else -> fail("Unexpected result.", keepConversation = conversationActive)
         }
     }
 
@@ -607,15 +1204,17 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }) {
             CommandResult.Success -> {
                 presentJarvisUiAfterAutomation()
-                setPhase(JarvisPhase.COMPLETED, "Completed", "Playing ${command.songName}.")
-                speak("Playing ${command.songName}.")
-                // Keep COMPLETED visible until the user dismisses the floating panel.
+                val msg = "Playing ${command.songName}."
+                conversationMemory.addAssistant(msg)
+                setPhase(JarvisPhase.COMPLETED, "Completed", msg)
+                speak(msg, resumeConversationAfter = conversationActive)
+                Log.i(TAG, "ACTION_RESULT")
             }
             is CommandResult.Failure -> {
                 presentJarvisUiAfterAutomation()
-                fail(result.message)
+                fail(result.message, keepConversation = conversationActive)
             }
-            else -> fail("Unexpected YouTube result.")
+            else -> fail("Unexpected YouTube result.", keepConversation = conversationActive)
         }
     }
 
@@ -631,23 +1230,22 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }) {
             CommandResult.Success -> {
                 presentJarvisUiAfterAutomation()
-                setPhase(
-                    JarvisPhase.COMPLETED,
-                    "Completed",
-                    "Showing YouTube results for ${command.query}."
-                )
-                speak("Here are the results.")
-                // Keep COMPLETED visible until the user dismisses the floating panel.
+                val msg = "Showing YouTube results for ${command.query}."
+                conversationMemory.addAssistant(msg)
+                setPhase(JarvisPhase.COMPLETED, "Completed", msg)
+                speak("Here are the results.", resumeConversationAfter = conversationActive)
+                Log.i(TAG, "ACTION_RESULT")
             }
             is CommandResult.Failure -> {
                 presentJarvisUiAfterAutomation()
-                fail(result.message)
+                fail(result.message, keepConversation = conversationActive)
             }
-            else -> fail("Unexpected YouTube result.")
+            else -> fail("Unexpected YouTube result.", keepConversation = conversationActive)
         }
     }
 
     private suspend fun runWhatsAppPipeline(command: JarvisCommand.SendWhatsAppMessage) {
+        silenceController.pause()
         setPhase(JarvisPhase.EXECUTING, "Working…", "Opening WhatsApp…")
         speak("Opening WhatsApp.")
 
@@ -680,6 +1278,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 speak("Ready to send. Say send or cancel.")
                 scheduleConfirmationListeningAfterPrompt()
+                Log.i(TAG, "ACTION_RESULT")
             }
             is CommandResult.NeedsContactChoice -> {
                 presentJarvisUiAfterAutomation()
@@ -700,14 +1299,17 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
                 speak("Multiple contacts found.")
+                Log.i(TAG, "ACTION_RESULT")
             }
             is CommandResult.Failure -> {
                 presentJarvisUiAfterAutomation()
-                fail(result.message)
+                fail(result.message, keepConversation = conversationActive)
             }
             CommandResult.Success -> {
+                conversationMemory.addAssistant("Done.")
                 setPhase(JarvisPhase.COMPLETED, "Completed", "Done.")
-                // Keep COMPLETED visible until the user dismisses the floating panel.
+                speak("Done.", resumeConversationAfter = conversationActive)
+                Log.i(TAG, "ACTION_RESULT")
             }
             is CommandResult.Progress -> Unit
         }
@@ -719,7 +1321,6 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun presentJarvisUiAfterAutomation() {
         if (overlay.canDrawOverlays()) {
-            // Keep WhatsApp / YouTube in front; overlay shows confirmation / status.
             overlay.setHostInForeground(false)
             return
         }
@@ -732,30 +1333,51 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 phase = phase,
                 statusText = status,
                 assistantMessage = message,
-                errorMessage = null
+                errorMessage = null,
+                conversationActive = conversationActive
             )
         }
     }
 
-    private fun fail(message: String) {
+    private fun fail(message: String, keepConversation: Boolean = false) {
         stopMicForeground()
+        if (!keepConversation) {
+            micSession.release()
+        } else {
+            micSession.setWaitingForUser()
+        }
+        conversationMemory.addAssistant(message)
         _uiState.update {
             it.copy(
-                phase = JarvisPhase.ERROR,
-                statusText = "Error",
+                phase = if (keepConversation) JarvisPhase.WAITING_FOR_USER else JarvisPhase.ERROR,
+                statusText = if (keepConversation) "Waiting for you…" else "Error",
                 assistantMessage = message,
-                errorMessage = message,
+                errorMessage = if (keepConversation) null else message,
                 confirmationTitle = null,
-                pendingSend = null
+                pendingSend = null,
+                conversationActive = conversationActive && keepConversation
             )
         }
-        speak("Something went wrong.")
-        // Keep ERROR visible until the user dismisses the floating panel.
+        speak(
+            if (keepConversation) message else "Something went wrong.",
+            resumeConversationAfter = keepConversation && conversationActive
+        )
+        if (!keepConversation) {
+            // Keep ERROR visible until the user dismisses the floating panel.
+        }
     }
 
     private fun resetToIdle() {
         pendingConfirmationListen = false
+        pendingConversationResume = false
+        pendingAfterAckCommand = null
         listeningForConfirmation = false
+        listeningForInterrupt = false
+        cancelBargeInListening()
+        conversationActive = false
+        silenceController.stopSession()
+        conversationMemory.clear()
+        micSession.release()
         _uiState.update {
             JarvisUiState(
                 phase = JarvisPhase.IDLE,
@@ -763,7 +1385,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 needsMicrophone = it.needsMicrophone,
                 needsAccessibility = it.needsAccessibility,
                 needsOverlayPermission = it.needsOverlayPermission,
-                setupComplete = it.setupComplete
+                setupComplete = it.setupComplete,
+                conversationActive = false
             )
         }
     }
@@ -788,9 +1411,6 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    /**
-     * Listen for spoken Send / Cancel without leaving CONFIRMATION or clearing pendingSend.
-     */
     private fun startConfirmationListening() {
         if (!isAwaitingSendConfirmation()) return
         if (_uiState.value.isListening) return
@@ -811,7 +1431,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         try {
             speech.startListening()
         } catch (t: Throwable) {
-            Log.e("JarvisViewModel", "Confirmation listen failed", t)
+            Log.e(TAG, "Confirmation listen failed", t)
             listeningForConfirmation = false
             stopMicForeground()
             _uiState.update {
@@ -835,15 +1455,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val commandText = WakePhraseParser.stripWakePhrase(text).ifBlank { text.trim() }
         when (ConfirmationPhraseParser.parse(commandText)) {
             ConfirmationPhraseParser.Decision.SEND -> {
-                Log.i("JarvisViewModel", "Voice confirmation: SEND")
+                Log.i(TAG, "Voice confirmation: SEND")
                 confirmSend()
             }
             ConfirmationPhraseParser.Decision.CANCEL -> {
-                Log.i("JarvisViewModel", "Voice confirmation: CANCEL")
+                Log.i(TAG, "Voice confirmation: CANCEL")
                 cancelSend()
             }
             ConfirmationPhraseParser.Decision.UNKNOWN -> {
-                Log.i("JarvisViewModel", "Voice confirmation unclear: $commandText")
+                Log.i(TAG, "Voice confirmation unclear")
                 _uiState.update {
                     it.copy(
                         phase = JarvisPhase.CONFIRMATION,
@@ -874,17 +1494,25 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         speechCollectJob?.cancel()
         pipelineJob?.cancel()
+        bargeInJob?.cancel()
         pendingConfirmationListen = false
+        pendingConversationResume = false
+        pendingAfterAckCommand = null
         listeningForConfirmation = false
+        listeningForInterrupt = false
+        silenceController.stopSession()
+        conversationMemory.clear()
+        conversationActive = false
         speech.destroy()
         tts.shutdown()
         stopMicForeground()
-        // Do not dismiss the floating panel or stop AccessibilityService here.
-        // Activity recreation must not permanently tear down Jarvis overlay state;
-        // the next ViewModel rebinds hostCallbacks. User dismisses via X / swipe.
-        // Keep hands-free wake running across Activity recreation — only unbind host.
+        micSession.release()
         handsFree.bindHost(null)
         overlay.hostCallbacks = null
         super.onCleared()
+    }
+
+    companion object {
+        private const val TAG = "JarvisViewModel"
     }
 }

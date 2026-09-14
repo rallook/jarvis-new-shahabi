@@ -114,7 +114,12 @@ fun MainScreen(
             onSelectContact = onSelectContact,
             onSubmitTextCommand = onSubmitTextCommand,
             micEnabled = !state.needsMicrophone &&
-                state.phase !in setOf(JarvisPhase.THINKING, JarvisPhase.SENDING, JarvisPhase.VERIFYING),
+                state.phase !in setOf(
+                    JarvisPhase.THINKING,
+                    JarvisPhase.SENDING,
+                    JarvisPhase.VERIFYING,
+                    JarvisPhase.ENDING
+                ),
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()

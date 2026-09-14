@@ -6,9 +6,8 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 
 /**
- * Coordinates the shared microphone foreground service between command STT
- * and hands-free wake listening so only one FGS notification is shown and
- * the service is not stopped while either holder still needs the mic.
+ * Coordinates the shared microphone foreground service between conversation STT
+ * and idle wake listening so only one FGS notification is shown.
  */
 object MicForegroundGate {
 

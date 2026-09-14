@@ -49,6 +49,7 @@ class CommandExecutor(
             is JarvisCommand.SetTimer -> setTimer(command, onProgress)
             is JarvisCommand.SetAlarm -> setAlarm(command, onProgress)
             is JarvisCommand.GoogleSearch -> googleSearch(command, onProgress)
+            is JarvisCommand.CloseJarvis -> CommandResult.Success
             is JarvisCommand.Unsupported -> CommandResult.Failure(command.reason)
         }
     }
